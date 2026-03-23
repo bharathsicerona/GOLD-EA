@@ -1,0 +1,9 @@
+# Ignore compiled MetaTrader 5 executables
+*.ex5
+
+# Ignore generated logs and test outputs
+logs/
+backlog_test*.txt
+
+# Ignore MT5 specific IDE files
+*.mqproj

@@ -1,0 +1,84 @@
+XAUUSDm Exness Starter Preset
+===========================
+
+Purpose:
+- Starter input values for the advanced EA on Exness
+- Meant for demo testing first
+- Tuned for M5 gold trading
+
+EA File:
+- XAUUSD_Adaptive_MultiFactor_EA.mq5
+
+Recommended Starter Inputs
+--------------------------
+InpTradeSymbol = XAUUSDm
+InpTimeframe = PERIOD_M5
+InpMagicNumber = 26032026
+
+InpFastEmaPeriod = 21
+InpSlowEmaPeriod = 100
+InpRsiPeriod = 14
+InpAtrPeriod = 14
+
+InpVolAtrThreshold = 150.0
+InpBandsPeriod = 20
+InpBandsDeviation = 2.0
+
+InpRsiBuyMin = 52.0
+InpRsiBuyMax = 68.0
+InpRsiSellMin = 32.0
+InpRsiSellMax = 48.0
+
+InpRiskPercent = 1.0
+InpStopAtrMultiplier = 1.3
+InpTakeProfitMultiplier = 1.8
+InpTrailAtrMultiplier = 0.8
+InpMinAtrPoints = 120.0
+InpPullbackAtrFactor = 0.20
+
+InpAllowBuyTrades = true
+InpAllowSellTrades = true
+
+InpMaxSpreadPoints = 500
+InpAsianStartHour = 0
+InpAsianEndHour = 8
+InpLondonStartHour = 8
+InpLondonEndHour = 13
+InpNewYorkStartHour = 13
+InpNewYorkEndHour = 22
+
+InpUseScoring = SCORE_ENABLED
+InpMinimumScore = 80
+InpWeightTrend = 30
+InpWeightEmaAlignment = 25
+InpWeightRsi = 20
+InpWeightRangeBB = 50
+InpWeightBreakout = 50
+InpWeightPullback = 25
+
+InpEnableDebugPrints = true
+InpEnableCSVLogging = true
+InpEnableDashboard = true
+InpLogEveryTick = false
+InpLogRetentionDays = 7
+InpEnablePushAlerts = false
+InpEnableEmailAlerts = false
+
+How To Use
+----------
+1. Attach the EA to an XAUUSDm chart in MT5.
+2. Open the Inputs tab.
+3. Enter the values above.
+4. Save them as a broker-specific preset from MT5 if you want a reusable `.set` file.
+
+Exness Notes
+------------
+1. This preset is built for the exact symbol `XAUUSDm`.
+2. If your account uses a different suffix, change `InpTradeSymbol` to the exact market watch symbol.
+3. Session hours use broker server time, so check Exness server time before live use.
+4. If spread is frequently above 500 points on your account type, increase `InpMaxSpreadPoints` slightly and retest.
+
+When To Adjust This Preset
+--------------------------
+- If too many trades: raise `InpMinimumScore` to `85` or adjust `InpVolAtrThreshold`.
+- If too few trades: reduce `InpMinimumScore` to `75`.
