@@ -41,7 +41,7 @@ It then applies:
 - Fixed percentage risk per trade
 - ATR-based stop loss
 - Dynamic take profit
-- Breakeven logic
+- Minimal profit locking
 - ATR trailing stop
 - Partial profit taking
 
@@ -52,8 +52,8 @@ It then applies:
 - **Sell:** Price near upper Bollinger Band AND RSI indicates overbought.
 
 ### Breakout Strategy (London Session, High Volatility)
-- **Buy:** Price breaks above the recorded Asian session high.
-- **Sell:** Price breaks below the recorded Asian session low.
+- **Buy:** Price breaks above the recorded Asian session high (or a strong EMA trend with `ADX > 25` overrides a weak breakout).
+- **Sell:** Price breaks below the recorded Asian session low (or a strong EMA trend with `ADX > 25` overrides a weak breakout).
 
 ### Trend Strategy (New York Session, High Volatility)
 - **Buy:** Price > slow EMA, fast EMA > slow EMA, RSI is in buy zone, and price pulls back to the fast EMA.
@@ -64,8 +64,8 @@ It then applies:
 The EA uses adaptive risk management.
 
 - Risk per trade: `1%` of account balance by default
-- Stop loss: `1.3 x ATR`
-- Take profit: `1.8 x stop loss`
+- Stop loss: `1.8 x ATR`
+- Take profit: `3.0 x ATR` (focused on larger R:R targets)
 - Lot size is calculated automatically from stop-loss distance
 - Calculated volume is normalized to the broker lot step and clamped to the broker minimum lot when needed
 
@@ -75,9 +75,12 @@ This means the EA adjusts position size depending on current market volatility.
 
 After a trade is opened, the EA manages it automatically:
 
-- Moves stop loss to breakeven at `1R`
+- Locks a minimal profit of `0.3 x ATR` when profit reaches `1.2 x ATR`
 - Closes `50%` of the position at `1.5R`
-- Uses an ATR-based trailing stop for the remaining volume
+- Delays trailing until profit reaches `2.0 x ATR`
+- Uses a `2.5 x ATR` trailing stop distance to let the trend breathe, **updated strictly on new bars**
+- Mandates a minimum trailing step of `0.5 x ATR` to filter market noise
+- **Profit Lock:** Automatically locks `1.0 x ATR` in secured profit once a trade reaches a `2.5 x ATR` profit margin
 - Keeps only one buy and one sell position at a time
 
 ## 5. Built-In Filters
@@ -110,6 +113,8 @@ Each setup gets a score from `0` to `100` based on weighted factors:
 - Pullback quality near `EMA50`
 - Range Bollinger Band proximity
 - Asian session breakout confirmation
+- **Momentum Boost:** `+15` points added during London or NY sessions if `ADX > 25`
+- **Breakout Penalty:** `-20` points deducted if trading the Breakout strategy without a valid Asian box break
 
 The EA can be configured to trade only when the score is above a minimum threshold such as `80`.
 
@@ -268,9 +273,10 @@ These are not guaranteed best settings, but they are a sensible starting point f
 - RSI: `14`
 - ATR: `14`
 - Risk: `1%`
-- Stop ATR: `1.3`
-- Take Profit Multiplier: `1.8`
-- Trailing ATR: `0.8`
+- Stop ATR: `1.8`
+- Take Profit Multiplier: `3.0`
+- Min Profit Lock ATR: `0.3`
+- Trailing ATR: `2.5`
 - Min ATR Points: `120`
 - Max Spread Points: `500`
 - Score Threshold: `80`
@@ -428,7 +434,7 @@ Logging behavior in the advanced EA:
 - Logs every tick decision as a live preview, even when no trade is taken
 - Logs separate bar-close execution signals before real order placement
 - Logs buy and sell executions
-- Logs breakeven, partial close, and trailing-stop actions
+- Logs minimal profit locks, partial close, and trailing-stop actions
 - Shows a live dashboard directly on the chart using labels
 - Clears stale per-trade global variables on new bars after closed positions are gone
 - Deletes daily CSV logs older than `InpLogRetentionDays`
@@ -468,3 +474,29 @@ How to view the dashboard:
 1. Keep `InpEnableDashboard = true`.
 2. Attach the EA to a chart.
 3. The decision line now shows whether the result is `LIVE_PREVIEW` or `BAR_CLOSE_SIGNAL`.
+
+## Known Limitations / Future Improvements
+
+### Lot Size & Risk Scaling (Deferred Improvement)
+
+Current behavior:
+
+* The EA forces minimum lot size (0.01) when calculated lot is below broker minimum.
+
+Impact:
+
+* Risk per trade is not perfectly aligned with account size.
+* Backtest and live results may slightly overestimate risk consistency.
+
+Reason for deferring fix:
+
+* Current trading capital is small.
+* Maintaining execution consistency is prioritized over strict risk precision.
+* Skipping trades or dynamically adjusting SL would reduce system activity.
+
+Future plan:
+
+* Implement dynamic position sizing:
+  Option 1: Adjust stop loss distance to match risk
+  Option 2: Skip trades when minimum lot violates risk rules
+* Revisit once account balance increases.

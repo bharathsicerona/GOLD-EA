@@ -1,5 +1,5 @@
 #property strict
-#property version   "2.00"
+#property version   "4.30"
 #property description "Adaptive multi-factor Expert Advisor for XAUUSDm on MT5 with CSV logging and dashboard"
 
 #include <Trade/Trade.mqh>
@@ -48,11 +48,22 @@ input double           InpRiskPercent            = 1.0;
 input bool             InpAllowCounterTrend      = true;       // Allow Counter-Trend
 input double           InpCounterTrendRisk       = 0.50;       // Counter-Trend Risk %
 input int              InpCounterTrendMinScore   = 85;         // Counter-Trend Min Score
-input double           InpStopAtrMultiplier      = 1.3;
-input double           InpTakeProfitMultiplier   = 1.8;
-input double           InpTrailAtrMultiplier     = 0.8;
+input int              InpMaxConcurrentTrades    = 2;          // Max Concurrent Trades per Direction
+input double           InpStopAtrMultiplier      = 1.8;
+input double           InpTakeProfitMultiplier   = 3.0;
+input double           InpBreakevenAtrMultiplier = 1.2;
+input double           InpMinProfitLockAtr       = 0.30;
+input double           InpTrailActivationAtrMultiplier = 2.0;
+input double           InpTrailAtrMultiplier     = 2.5;
+input double           InpTrailStepAtrMultiplier = 0.50;
+input double           InpProfitLockActivationAtr = 2.5;
+input double           InpProfitLockAtr          = 1.0;
 input double           InpMinAtrPoints           = 120.0;
-input double           InpPullbackAtrFactor      = 0.20;
+input double           InpPullbackAtrFactor      = 0.50;
+
+input int              InpAdxPeriod              = 14;
+input double           InpAdxThreshold           = 20.0;
+input double           InpEmaGapAtrFactor        = 0.5;
 
 input bool             InpAllowBuyTrades         = true;
 input bool             InpAllowSellTrades        = true;
@@ -66,7 +77,7 @@ input int              InpNewYorkStartHour       = 13;
 input int              InpNewYorkEndHour         = 22;
 
 input ENUM_SCORE_MODE  InpUseScoring             = SCORE_ENABLED;
-input int              InpMinimumScore           = 80;
+input int              InpMinimumScore           = 75;
 input int              InpWeightTrend            = 30;
 input int              InpWeightEmaAlignment     = 25;
 input int              InpWeightRsi              = 20;
@@ -90,6 +101,7 @@ int      g_slowEmaHandle    = INVALID_HANDLE;
 int      g_rsiHandle        = INVALID_HANDLE;
 int      g_bbHandle         = INVALID_HANDLE;
 int      g_atrHandle        = INVALID_HANDLE;
+int      g_adxHandle        = INVALID_HANDLE;
 int      g_symbolDigits     = 2;
 datetime g_lastBarTime      = 0;
 datetime g_lastBuyBar       = 0;
@@ -118,6 +130,12 @@ struct IndicatorSnapshot
    double bbUpper;
    double bbLower;
    double bbBase;
+   double adx;
+   double prevAdx;
+   bool   adxIncreasing;
+   bool   emaGapOk;
+   bool   trendPersistentBuy;
+   bool   trendPersistentSell;
    long   spread;
    bool   spreadOk;
    bool   isHighVol;
@@ -305,8 +323,9 @@ void UpdateAsianRange()
      }
   }
 
-bool PositionExists(const ENUM_POSITION_TYPE positionType)
+int CountPositions(const ENUM_POSITION_TYPE positionType)
   {
+   int count = 0;
    for(int i = PositionsTotal() - 1; i >= 0; --i)
      {
       ulong ticket = PositionGetTicket(i);
@@ -320,9 +339,9 @@ bool PositionExists(const ENUM_POSITION_TYPE positionType)
          continue;
 
       if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == positionType)
-         return true;
+         count++;
      }
-   return false;
+   return count;
   }
 
 ulong FindPositionTicket(const ENUM_POSITION_TYPE positionType)
@@ -477,17 +496,24 @@ bool CalculateIndicators(IndicatorSnapshot &snapshot,const int shift)
    snapshot.shift = shift;
 
    MqlRates rates[];
-   if(!GetRates(rates,shift + 4))
+   if(!GetRates(rates,shift + 5))
       return false;
 
+   double fEma1, fEma2, sEma1, sEma2;
    if(!GetIndicatorValue(g_fastEmaHandle,shift,snapshot.fastEma) ||
+      !GetIndicatorValue(g_fastEmaHandle,shift+1,fEma1) ||
+      !GetIndicatorValue(g_fastEmaHandle,shift+2,fEma2) ||
       !GetIndicatorValue(g_slowEmaHandle,shift,snapshot.slowEma) ||
+      !GetIndicatorValue(g_slowEmaHandle,shift+1,sEma1) ||
+      !GetIndicatorValue(g_slowEmaHandle,shift+2,sEma2) ||
       !GetIndicatorValue(g_rsiHandle,shift,snapshot.rsi) ||
       !GetIndicatorValue(g_rsiHandle,shift+1,snapshot.prevRsi) ||
       !GetIndicatorValue(g_bbHandle,shift,snapshot.bbBase,0) ||
       !GetIndicatorValue(g_bbHandle,shift,snapshot.bbUpper,1) ||
       !GetIndicatorValue(g_bbHandle,shift,snapshot.bbLower,2) ||
-      !GetIndicatorValue(g_atrHandle,shift,snapshot.atr))
+      !GetIndicatorValue(g_atrHandle,shift,snapshot.atr) ||
+      !GetIndicatorValue(g_adxHandle,shift,snapshot.adx,0) ||
+      !GetIndicatorValue(g_adxHandle,shift+1,snapshot.prevAdx,0))
       return false;
 
    int nextIndex = shift + 1;
@@ -511,6 +537,17 @@ bool CalculateIndicators(IndicatorSnapshot &snapshot,const int shift)
    snapshot.rsiSellOk      = (snapshot.rsi >= InpRsiSellMin && snapshot.rsi <= InpRsiSellMax);
    snapshot.pullbackBuyOk  = (MathAbs(snapshot.lowPrice - snapshot.fastEma) <= snapshot.atr * InpPullbackAtrFactor);
    snapshot.pullbackSellOk = (MathAbs(snapshot.highPrice - snapshot.fastEma) <= snapshot.atr * InpPullbackAtrFactor);
+   
+   snapshot.emaGapOk = (MathAbs(snapshot.fastEma - snapshot.slowEma) >= snapshot.atr * InpEmaGapAtrFactor);
+   snapshot.adxIncreasing = (snapshot.adx > snapshot.prevAdx);
+   
+   snapshot.trendPersistentBuy = (snapshot.closePrice > snapshot.slowEma && snapshot.fastEma > snapshot.slowEma) &&
+                                 (rates[shift+1].close > sEma1 && fEma1 > sEma1) &&
+                                 (rates[shift+2].close > sEma2 && fEma2 > sEma2);
+   snapshot.trendPersistentSell = (snapshot.closePrice < snapshot.slowEma && snapshot.fastEma < snapshot.slowEma) &&
+                                  (rates[shift+1].close < sEma1 && fEma1 < sEma1) &&
+                                  (rates[shift+2].close < sEma2 && fEma2 < sEma2);
+                                  
    snapshot.valid = true;
    return true;
   }
@@ -585,28 +622,61 @@ DecisionContext RunBreakoutStrategy(const ENUM_POSITION_TYPE direction,const Ind
 
    int rawScore = 0;
    bool breakOk = false;
+   bool trendOk = false;
+   bool rsiOk = false;
+   bool pullbackOk = false;
 
    if(direction == POSITION_TYPE_BUY)
      {
       breakOk = (g_asianHigh > 0 && snapshot.closePrice > g_asianHigh);
-      if(breakOk) rawScore += InpWeightBreakout;
+      trendOk = snapshot.priceAboveSlow && snapshot.emaBullish;
+      rsiOk = snapshot.rsiBuyOk;
+      pullbackOk = snapshot.pullbackBuyOk;
      }
    else
      {
       breakOk = (g_asianLow > 0 && snapshot.closePrice < g_asianLow);
-      if(breakOk) rawScore += InpWeightBreakout;
+      trendOk = snapshot.priceBelowSlow && snapshot.emaBearish;
+      rsiOk = snapshot.rsiSellOk;
+      pullbackOk = snapshot.pullbackSellOk;
      }
 
-   int maxScore = InpWeightBreakout;
+   if(trendOk) rawScore += InpWeightTrend + InpWeightEmaAlignment;
+   if(rsiOk) rawScore += InpWeightRsi;
+   if(pullbackOk) rawScore += InpWeightPullback;
+   if(breakOk) rawScore += InpWeightBreakout;
+
+   int maxScore = InpWeightTrend + InpWeightEmaAlignment + InpWeightRsi + InpWeightPullback + InpWeightBreakout;
    ctx.score = maxScore > 0 ? (int)MathRound((double)rawScore * 100.0 / (double)maxScore) : 0;
 
+   if((snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK) && snapshot.adx > 25.0)
+      ctx.score += 15;
+      
+   if(!breakOk)
+      ctx.score -= 20;
+      
+   if(ctx.score > 100) ctx.score = 100;
+   if(ctx.score < 0) ctx.score = 0;
+
+   bool adxOk = (snapshot.adx > InpAdxThreshold);
+   bool emaGapOk = snapshot.emaGapOk;
+   bool persistenceOk = (direction == POSITION_TYPE_BUY) ? snapshot.trendPersistentBuy : snapshot.trendPersistentSell;
+
+   bool structureOk = trendOk && rsiOk && pullbackOk;
    bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= InpMinimumScore);
-   ctx.valid = snapshot.spreadOk && breakOk && scoreOk;
+   bool strongTrendOverride = (ctx.score >= 90);
+   bool trendOverride = (!breakOk && trendOk && adxOk && ctx.score >= 80);
+   
+   ctx.valid = snapshot.spreadOk && adxOk && (emaGapOk || strongTrendOverride) && (persistenceOk || strongTrendOverride) && (structureOk || strongTrendOverride) && scoreOk && (breakOk || trendOverride);
 
    if(!snapshot.spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
-   else if(!breakOk) ctx.reason = "NO_ASIAN_BREAKOUT";
+   else if(!adxOk) ctx.reason = "WEAK_TREND";
+   else if(!emaGapOk && !strongTrendOverride) ctx.reason = "SIDEWAYS_MARKET";
+   else if(!persistenceOk && !strongTrendOverride) ctx.reason = "UNSTABLE_TREND";
+   else if(!structureOk && !strongTrendOverride) ctx.reason = "TREND_STRUCTURE_FAIL";
+   else if(!breakOk && !trendOverride) ctx.reason = "WEAK_BREAKOUT";
    else if(!scoreOk) ctx.reason = "SCORE_TOO_LOW";
-   else ctx.reason = "SETUP_VALID";
+   else ctx.reason = strongTrendOverride ? "SETUP_VALID_OVERRIDE" : "SETUP_VALID";
 
    return ctx;
   }
@@ -653,14 +723,29 @@ DecisionContext RunTrendStrategy(const ENUM_POSITION_TYPE direction,const Indica
    int maxScore = InpWeightTrend + InpWeightEmaAlignment + InpWeightRsi + InpWeightPullback;
    ctx.score = maxScore > 0 ? (int)MathRound((double)rawScore * 100.0 / (double)maxScore) : 0;
 
+   if((snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK) && snapshot.adx > 25.0)
+      ctx.score += 15;
+      
+   if(ctx.score > 100) ctx.score = 100;
+   if(ctx.score < 0) ctx.score = 0;
+
+   bool adxOk = (snapshot.adx > InpAdxThreshold);
+   bool emaGapOk = snapshot.emaGapOk;
+   bool persistenceOk = (direction == POSITION_TYPE_BUY) ? snapshot.trendPersistentBuy : snapshot.trendPersistentSell;
+
    bool structureOk = trendOk && rsiOk && pullbackOk;
    bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= InpMinimumScore);
-   ctx.valid = snapshot.spreadOk && structureOk && scoreOk;
+   bool strongTrendOverride = (ctx.score >= 90);
+   
+   ctx.valid = snapshot.spreadOk && adxOk && (emaGapOk || strongTrendOverride) && (persistenceOk || strongTrendOverride) && (structureOk || strongTrendOverride) && scoreOk;
 
    if(!snapshot.spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
-   else if(!structureOk) ctx.reason = "TREND_STRUCTURE_FAIL";
+   else if(!adxOk) ctx.reason = "WEAK_TREND";
+   else if(!emaGapOk && !strongTrendOverride) ctx.reason = "SIDEWAYS_MARKET";
+   else if(!persistenceOk && !strongTrendOverride) ctx.reason = "UNSTABLE_TREND";
+   else if(!structureOk && !strongTrendOverride) ctx.reason = "TREND_STRUCTURE_FAIL";
    else if(!scoreOk) ctx.reason = "SCORE_TOO_LOW";
-   else ctx.reason = "SETUP_VALID";
+   else ctx.reason = strongTrendOverride ? "SETUP_VALID_OVERRIDE" : "SETUP_VALID";
 
    return ctx;
   }
@@ -668,13 +753,15 @@ DecisionContext RunTrendStrategy(const ENUM_POSITION_TYPE direction,const Indica
 DecisionContext SelectAndRunStrategy(const ENUM_POSITION_TYPE direction,const IndicatorSnapshot &snapshot,const bool isBarClose = false)
   {
    DecisionContext ctx;
-   if(snapshot.session == SESSION_NONE)
+   bool sessionOk = (snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK);
+   
+   if(!sessionOk)
      {
       ctx.type = direction;
       ctx.action = "SIGNAL_CHECK";
       ctx.phase = "UNSPECIFIED";
       ctx.decision = PositionTypeText(direction);
-      ctx.sessionName = "NONE";
+      ctx.sessionName = SessionToString(snapshot.session);
       ctx.strategyName = "NO_SESSION";
       ctx.status = "BLOCKED";
       ctx.price = snapshot.price;
@@ -688,6 +775,10 @@ DecisionContext SelectAndRunStrategy(const ENUM_POSITION_TYPE direction,const In
       ctx.riskPercent = 0.0;
       ctx.valid = false;
       ctx.reason = "SESSION_BLOCKED";
+      
+      if(isBarClose)
+         DebugPrint(StringFormat("[%s] %s check: price=%.2f atr=%.2f score=%d reason=%s",
+                                 ctx.strategyName, PositionTypeText(direction), ctx.price, ctx.atr, ctx.score, ctx.reason));
       return ctx;
      }
 
@@ -732,13 +823,15 @@ DecisionContext SelectAndRunStrategy(const ENUM_POSITION_TYPE direction,const In
 DecisionContext PickBestDecision(const DecisionContext &buyContext,const DecisionContext &sellContext,const IndicatorSnapshot &snapshot)
   {
    DecisionContext result;
+   bool sessionOk  = (snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK);
+   
    result.valid    = false;
    result.type     = POSITION_TYPE_BUY;
    result.action   = "TICK_EVAL";
    result.phase    = "LIVE_PREVIEW";
    result.decision = "SKIPPED";
    result.reason   = "NO_SETUP";
-   result.status   = snapshot.spreadOk ? "ACTIVE" : "BLOCKED";
+   result.status   = (snapshot.spreadOk && sessionOk) ? "ACTIVE" : "BLOCKED";
    result.sessionName = SessionToString(snapshot.session);
    result.strategyName = "EVAL_PENDING";
    result.price    = snapshot.price;
@@ -757,7 +850,9 @@ DecisionContext PickBestDecision(const DecisionContext &buyContext,const Decisio
    if(sellContext.valid)
       return sellContext;
 
-   if(!snapshot.spreadOk)
+   if(!sessionOk)
+      result.reason = "SESSION_BLOCKED";
+   else if(!snapshot.spreadOk)
       result.reason = "SPREAD_TOO_HIGH";
    else if(buyContext.score >= sellContext.score)
      {
@@ -808,7 +903,7 @@ void UpdateDashboard(const DecisionContext &context)
       decisionColor = clrTomato;
 
    SetDashboardLine("Title","Gold EA Dashboard",clrWhite,0);
-   SetDashboardLine("Session",StringFormat("Session        : %s",context.sessionName),clrAqua,1);
+   SetDashboardLine("Session",StringFormat("Session        : %s [%s]",context.sessionName,context.status),statusColor,1);
    SetDashboardLine("Strategy",StringFormat("Strategy       : %s (Risk: %.1f%%)",context.strategyName,context.riskPercent),clrPlum,2);
    SetDashboardLine("ATR",StringFormat("ATR            : %.2f",context.atr),clrKhaki,3);
    SetDashboardLine("Score",StringFormat("Current Score  : %d",context.score),scoreColor,4);
@@ -860,14 +955,14 @@ bool ExecuteTrade(const DecisionContext &context)
      {
       entryPrice = SymbolInfoDouble(InpTradeSymbol,SYMBOL_ASK);
       sl = NormalizeDouble(entryPrice - riskDistance,g_symbolDigits);
-      tp = NormalizeDouble(entryPrice + riskDistance * InpTakeProfitMultiplier,g_symbolDigits);
+      tp = NormalizeDouble(entryPrice + context.atr * InpTakeProfitMultiplier,g_symbolDigits);
       riskDistance = entryPrice - sl;
      }
    else if(context.type == POSITION_TYPE_SELL)
      {
       entryPrice = SymbolInfoDouble(InpTradeSymbol,SYMBOL_BID);
       sl = NormalizeDouble(entryPrice + riskDistance,g_symbolDigits);
-      tp = NormalizeDouble(entryPrice - riskDistance * InpTakeProfitMultiplier,g_symbolDigits);
+      tp = NormalizeDouble(entryPrice - context.atr * InpTakeProfitMultiplier,g_symbolDigits);
       riskDistance = sl - entryPrice;
      }
 
@@ -904,7 +999,7 @@ bool ExecuteTrade(const DecisionContext &context)
      {
       GlobalVariableSet(BuildStateKey("initrisk",ticket),riskDistance);
       GlobalVariableSet(BuildStateKey("partial",ticket),0.0);
-      GlobalVariableSet(BuildStateKey("breakeven",ticket),0.0);
+      GlobalVariableSet(BuildStateKey("minprofit",ticket),0.0);
       GlobalVariableSet(BuildStateKey("tradeid",ticket),(double)tradeId);
      }
 
@@ -930,7 +1025,7 @@ bool ExecuteTrade(const DecisionContext &context)
    return true;
   }
 
-void ManageTrade(const ulong ticket)
+void ManageTrade(const ulong ticket, const bool isNewBar)
   {
    if(!PositionSelectByTicket(ticket))
       return;
@@ -968,26 +1063,39 @@ void ManageTrade(const ulong ticket)
                                                        : (openPrice - priceNow);
    double rMultiple = profitDistance / initialRisk;
 
-   string beKey = BuildStateKey("breakeven",ticket);
-   if(rMultiple >= 1.0 && (!GlobalVariableCheck(beKey) || GlobalVariableGet(beKey) < 1.0))
+   string trailStartKey = BuildStateKey("trailstart",ticket);
+   bool isTrailActive = (GlobalVariableCheck(trailStartKey) && GlobalVariableGet(trailStartKey) >= 1.0);
+
+   string lockKey = BuildStateKey("minprofit",ticket);
+   if(!isTrailActive && profitDistance >= (snapshot.atr * InpBreakevenAtrMultiplier) && (!GlobalVariableCheck(lockKey) || GlobalVariableGet(lockKey) < 1.0))
      {
       bool needsBeModify = false;
-      if(type == POSITION_TYPE_BUY && (currentSl < openPrice || currentSl == 0.0)) needsBeModify = true;
-      if(type == POSITION_TYPE_SELL && (currentSl > openPrice || currentSl == 0.0)) needsBeModify = true;
+      double newSl = 0.0;
+      
+      if(type == POSITION_TYPE_BUY)
+        {
+         newSl = NormalizeDouble(openPrice + snapshot.atr * InpMinProfitLockAtr, g_symbolDigits);
+         if(currentSl < newSl || currentSl == 0.0) needsBeModify = true;
+        }
+      else if(type == POSITION_TYPE_SELL)
+        {
+         newSl = NormalizeDouble(openPrice - snapshot.atr * InpMinProfitLockAtr, g_symbolDigits);
+         if(currentSl > newSl || currentSl == 0.0) needsBeModify = true;
+        }
 
       if(needsBeModify)
         {
-         double newSl = NormalizeDouble(openPrice,g_symbolDigits);
          if(trade.PositionModify(ticket,newSl,currentTp))
            {
-            GlobalVariableSet(beKey,1.0);
-            DebugPrint(StringFormat("Breakeven moved for ticket=%I64u",ticket));
-            LogToCSV("BREAKEVEN",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),"BREAKEVEN_TRIGGERED");
+            GlobalVariableSet(lockKey,1.0);
+            DebugPrint(StringFormat("Minimal profit lock moved for ticket=%I64u",ticket));
+            string reasonStr = StringFormat("PROFIT_%.2f_SL_%.2f", profitDistance, newSl);
+            LogToCSV("MIN_PROFIT_LOCK_TRIGGERED",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),reasonStr);
            }
         }
       else
         {
-         GlobalVariableSet(beKey,1.0);
+         GlobalVariableSet(lockKey,1.0);
         }
      }
 
@@ -1009,31 +1117,59 @@ void ManageTrade(const ulong ticket)
          GlobalVariableSet(partialKey,1.0);
      }
 
-   double trailedSl = currentSl;
-   if(type == POSITION_TYPE_BUY)
+   if(!isTrailActive && profitDistance >= snapshot.atr * InpTrailActivationAtrMultiplier)
      {
-      double candidate = NormalizeDouble(priceNow - snapshot.atr * InpTrailAtrMultiplier,g_symbolDigits);
-      if(candidate > trailedSl && candidate > openPrice)
-         trailedSl = candidate;
-     }
-   else if(type == POSITION_TYPE_SELL)
-     {
-      double candidate = NormalizeDouble(priceNow + snapshot.atr * InpTrailAtrMultiplier,g_symbolDigits);
-      if((trailedSl == 0.0 || candidate < trailedSl) && candidate < openPrice)
-         trailedSl = candidate;
+      isTrailActive = true;
+      GlobalVariableSet(trailStartKey,1.0);
+      LogToCSV("TRAILING_STARTED",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),"PROFIT_REACHED_ACTIVATION");
      }
 
-   double trailStep = 10.0 * SymbolInfoDouble(InpTradeSymbol,SYMBOL_POINT);
-   bool validTrailStep = false;
-   if(type == POSITION_TYPE_BUY && trailedSl >= currentSl + trailStep) validTrailStep = true;
-   if(type == POSITION_TYPE_SELL && (trailedSl <= currentSl - trailStep || currentSl == 0.0)) validTrailStep = true;
-
-   if(validTrailStep && trailedSl > 0.0)
+   if(isTrailActive && isNewBar)
      {
-      if(trade.PositionModify(ticket,trailedSl,currentTp))
+      double trailedSl = currentSl;
+      double trailStep = snapshot.atr * InpTrailStepAtrMultiplier;
+      bool validTrailStep = false;
+
+      if(type == POSITION_TYPE_BUY)
         {
-         DebugPrint(StringFormat("Trailing stop updated for ticket=%I64u",ticket));
-         LogToCSV("TRAILING_STOP",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),"TRAILING_STOP_UPDATED");
+         double candidate = NormalizeDouble(priceNow - snapshot.atr * InpTrailAtrMultiplier,g_symbolDigits);
+         
+         if(profitDistance >= snapshot.atr * InpProfitLockActivationAtr)
+           {
+            double profitLockSl = NormalizeDouble(openPrice + snapshot.atr * InpProfitLockAtr, g_symbolDigits);
+            candidate = MathMax(candidate, profitLockSl);
+           }
+           
+         if(candidate > trailedSl && candidate > openPrice)
+            trailedSl = candidate;
+            
+         if(trailedSl >= currentSl + trailStep) 
+            validTrailStep = true;
+        }
+      else if(type == POSITION_TYPE_SELL)
+        {
+         double candidate = NormalizeDouble(priceNow + snapshot.atr * InpTrailAtrMultiplier,g_symbolDigits);
+         
+         if(profitDistance >= snapshot.atr * InpProfitLockActivationAtr)
+           {
+            double profitLockSl = NormalizeDouble(openPrice - snapshot.atr * InpProfitLockAtr, g_symbolDigits);
+            candidate = MathMin(candidate, profitLockSl);
+           }
+           
+         if((trailedSl == 0.0 || candidate < trailedSl) && candidate < openPrice)
+            trailedSl = candidate;
+            
+         if(trailedSl <= currentSl - trailStep || currentSl == 0.0) 
+            validTrailStep = true;
+        }
+
+      if(validTrailStep && trailedSl > 0.0)
+        {
+         if(trade.PositionModify(ticket,trailedSl,currentTp))
+           {
+            DebugPrint(StringFormat("Trailing stop updated for ticket=%I64u",ticket));
+            LogToCSV("TRAILING_UPDATED",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),"TRAILING_STOP_MOVED");
+           }
         }
      }
   }
@@ -1060,14 +1196,14 @@ void CleanupStateGlobals()
      }
   }
 
-void ManageOpenTrades()
+void ManageOpenTrades(const bool isNewBar)
   {
    for(int i = PositionsTotal() - 1; i >= 0; --i)
      {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0)
          continue;
-      ManageTrade(ticket);
+      ManageTrade(ticket, isNewBar);
      }
   }
 
@@ -1092,16 +1228,31 @@ void EvaluateEntries()
       sellContext.valid = false;
       sellContext.reason = "SELL_DISABLED";
      }
-   if(PositionExists(POSITION_TYPE_BUY))
+     
+   int buyCount = CountPositions(POSITION_TYPE_BUY);
+   if(buyCount >= InpMaxConcurrentTrades)
      {
       buyContext.valid = false;
-      buyContext.reason = "BUY_POSITION_EXISTS";
+      buyContext.reason = "MAX_BUY_TRADES_REACHED";
      }
-   if(PositionExists(POSITION_TYPE_SELL))
+   else if(buyCount > 0)
+     {
+      bool continuationOk = entrySnapshot.emaBullish && (entrySnapshot.adx > InpAdxThreshold) && entrySnapshot.adxIncreasing;
+      if(!continuationOk) { buyContext.valid = false; buyContext.reason = "NO_CONTINUATION_TREND"; }
+     }
+     
+   int sellCount = CountPositions(POSITION_TYPE_SELL);
+   if(sellCount >= InpMaxConcurrentTrades)
      {
       sellContext.valid = false;
-      sellContext.reason = "SELL_POSITION_EXISTS";
+      sellContext.reason = "MAX_SELL_TRADES_REACHED";
      }
+   else if(sellCount > 0)
+     {
+      bool continuationOk = entrySnapshot.emaBearish && (entrySnapshot.adx > InpAdxThreshold) && entrySnapshot.adxIncreasing;
+      if(!continuationOk) { sellContext.valid = false; sellContext.reason = "NO_CONTINUATION_TREND"; }
+     }
+     
    if(g_lastBuyBar == g_lastBarTime)
      {
       buyContext.valid = false;
@@ -1146,15 +1297,29 @@ void EvaluateTickAndDashboard()
       sellContext.valid = false;
       sellContext.reason = "SELL_DISABLED";
      }
-   if(PositionExists(POSITION_TYPE_BUY))
+     
+   int buyCount = CountPositions(POSITION_TYPE_BUY);
+   if(buyCount >= InpMaxConcurrentTrades)
      {
       buyContext.valid = false;
-      buyContext.reason = "BUY_POSITION_EXISTS";
+      buyContext.reason = "MAX_BUY_TRADES_REACHED";
      }
-   if(PositionExists(POSITION_TYPE_SELL))
+   else if(buyCount > 0)
+     {
+      bool continuationOk = liveSnapshot.emaBullish && (liveSnapshot.adx > InpAdxThreshold) && liveSnapshot.adxIncreasing;
+      if(!continuationOk) { buyContext.valid = false; buyContext.reason = "NO_CONTINUATION_TREND"; }
+     }
+     
+   int sellCount = CountPositions(POSITION_TYPE_SELL);
+   if(sellCount >= InpMaxConcurrentTrades)
      {
       sellContext.valid = false;
-      sellContext.reason = "SELL_POSITION_EXISTS";
+      sellContext.reason = "MAX_SELL_TRADES_REACHED";
+     }
+   else if(sellCount > 0)
+     {
+      bool continuationOk = liveSnapshot.emaBearish && (liveSnapshot.adx > InpAdxThreshold) && liveSnapshot.adxIncreasing;
+      if(!continuationOk) { sellContext.valid = false; sellContext.reason = "NO_CONTINUATION_TREND"; }
      }
 
    DecisionContext current = PickBestDecision(buyContext,sellContext,liveSnapshot);
@@ -1173,12 +1338,14 @@ int OnInit()
    g_rsiHandle     = iRSI(InpTradeSymbol,InpTimeframe,InpRsiPeriod,PRICE_CLOSE);
    g_bbHandle      = iBands(InpTradeSymbol,InpTimeframe,InpBandsPeriod,0,InpBandsDeviation,PRICE_CLOSE);
    g_atrHandle     = iATR(InpTradeSymbol,InpTimeframe,InpAtrPeriod);
+   g_adxHandle     = iADX(InpTradeSymbol,InpTimeframe,InpAdxPeriod);
 
    if(g_fastEmaHandle == INVALID_HANDLE ||
       g_slowEmaHandle == INVALID_HANDLE ||
       g_rsiHandle == INVALID_HANDLE ||
       g_bbHandle == INVALID_HANDLE ||
-      g_atrHandle == INVALID_HANDLE)
+      g_atrHandle == INVALID_HANDLE ||
+      g_adxHandle == INVALID_HANDLE)
      {
       DebugPrint("Indicator handle creation failed");
       return INIT_FAILED;
@@ -1206,6 +1373,8 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_bbHandle);
    if(g_atrHandle != INVALID_HANDLE)
       IndicatorRelease(g_atrHandle);
+   if(g_adxHandle != INVALID_HANDLE)
+      IndicatorRelease(g_adxHandle);
       
    ObjectsDeleteAll(0, "GoldEA_Arrow_");
 
@@ -1223,9 +1392,11 @@ void OnTick()
   {
    UpdateAsianRange();
    EvaluateTickAndDashboard();
-   ManageOpenTrades();
+   
+   bool newBar = IsNewBar();
+   ManageOpenTrades(newBar);
 
-   if(!IsNewBar())
+   if(!newBar)
       return;
 
    CleanupStateGlobals();
