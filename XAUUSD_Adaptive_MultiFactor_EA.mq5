@@ -1,6 +1,6 @@
 #property strict
-#property version   "4.30"
-#property description "Adaptive multi-factor Expert Advisor for XAUUSDm on MT5 with CSV logging and dashboard"
+#property version   "4.00"
+#property description "M5 Adaptive Multi-Factor EA v4 for XAUUSDm on MT5 with CSV logging and dashboard"
 
 #include <Trade/Trade.mqh>
 
@@ -45,14 +45,20 @@ input double           InpRsiSellMin             = 32.0;
 input double           InpRsiSellMax             = 48.0;
 
 input double           InpRiskPercent            = 1.0;
+input double           InpMaxAbsoluteRiskPercent = 10.0;       // Max Allowed Risk % (Absolute Cap)
 input bool             InpAllowCounterTrend      = true;       // Allow Counter-Trend
 input double           InpCounterTrendRisk       = 0.50;       // Counter-Trend Risk %
 input int              InpCounterTrendMinScore   = 85;         // Counter-Trend Min Score
+input double           InpCounterTrendTpMultiplier = 1.2;      // Counter-Trend TP Multiplier
+input int              InpMaxOpenPositionsTotal  = 1;          // Max Global Open Positions
 input int              InpMaxConcurrentTrades    = 2;          // Max Concurrent Trades per Direction
+input int              InpTradeCooldownSeconds   = 300;        // Trade Cooldown (Seconds)
 input double           InpStopAtrMultiplier      = 1.8;
 input double           InpTakeProfitMultiplier   = 3.0;
 input double           InpBreakevenAtrMultiplier = 1.2;
 input double           InpMinProfitLockAtr       = 0.30;
+input double           InpAccountProfitLockTriggerPercent = 5.0;  // Account Profit Lock Trigger %
+input double           InpAccountProfitLockTargetPercent = 1.0;   // Account Profit Lock Target %
 input double           InpTrailActivationAtrMultiplier = 2.0;
 input double           InpTrailAtrMultiplier     = 2.5;
 input double           InpTrailStepAtrMultiplier = 0.50;
@@ -106,6 +112,7 @@ int      g_symbolDigits     = 2;
 datetime g_lastBarTime      = 0;
 datetime g_lastBuyBar       = 0;
 datetime g_lastSellBar      = 0;
+datetime g_lastTradeTime    = 0;
 int      g_lastAsianDay     = -1;
 
 double   g_asianHigh        = 0.0;
@@ -323,6 +330,52 @@ void UpdateAsianRange()
      }
   }
 
+bool RebuildAsianRangeFromHistory()
+  {
+   datetime now = TimeTradeServer();
+   MqlDateTime serverTime;
+   TimeToStruct(now,serverTime);
+
+   serverTime.hour = 0;
+   serverTime.min = 0;
+   serverTime.sec = 0;
+   datetime dayStart = StructToTime(serverTime);
+   datetime asianStart = dayStart + (InpAsianStartHour * 3600);
+   datetime asianEnd   = dayStart + (InpAsianEndHour * 3600);
+
+   datetime rangeEnd = now;
+   if(now >= asianEnd)
+      rangeEnd = asianEnd;
+   else if(now <= asianStart)
+      return false;
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates,false);
+   int copied = CopyRates(InpTradeSymbol,InpTimeframe,asianStart,rangeEnd,rates);
+   if(copied <= 0)
+      return false;
+
+   double high = 0.0;
+   double low  = 0.0;
+   for(int i = 0; i < copied; ++i)
+     {
+      if(rates[i].high > high)
+         high = rates[i].high;
+
+      if((low == 0.0 || rates[i].low < low) && rates[i].low > 0.0)
+         low = rates[i].low;
+     }
+
+   if(high <= 0.0 || low <= 0.0)
+      return false;
+
+   g_asianHigh = high;
+   g_asianLow = low;
+   g_lastAsianDay = serverTime.day_of_year;
+   DebugPrint(StringFormat("Asian range rebuilt from history: high=%.2f low=%.2f bars=%d",g_asianHigh,g_asianLow,copied));
+   return true;
+  }
+
 int CountPositions(const ENUM_POSITION_TYPE positionType)
   {
    int count = 0;
@@ -342,6 +395,21 @@ int CountPositions(const ENUM_POSITION_TYPE positionType)
          count++;
      }
    return count;
+  }
+
+bool HasOpenPosition()
+  {
+   return (CountPositions(POSITION_TYPE_BUY) + CountPositions(POSITION_TYPE_SELL)) >= InpMaxOpenPositionsTotal;
+  }
+
+bool HasBuyPosition()
+  {
+   return CountPositions(POSITION_TYPE_BUY) >= InpMaxConcurrentTrades;
+  }
+
+bool HasSellPosition()
+  {
+   return CountPositions(POSITION_TYPE_SELL) >= InpMaxConcurrentTrades;
   }
 
 ulong FindPositionTicket(const ENUM_POSITION_TYPE positionType)
@@ -364,12 +432,33 @@ ulong FindPositionTicket(const ENUM_POSITION_TYPE positionType)
    return 0;
   }
 
+ulong FindPositionTicketByComment(const string commentText)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != InpTradeSymbol)
+         continue;
+
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+
+      if(PositionGetString(POSITION_COMMENT) == commentText)
+         return ticket;
+     }
+
+   return 0;
+  }
+
 double CalculateLotSize(const double stopDistance, const double riskPercent)
   {
    if(stopDistance <= 0.0)
      {
       DebugPrint("Error: Invalid Stop Loss distance. Distance is 0.");
-      return SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) > 0 ? SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) : 0.01;
+      return 0.0;
      }
 
    double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -380,21 +469,24 @@ double CalculateLotSize(const double stopDistance, const double riskPercent)
    if(tickSize <= 0.0 || tickValue <= 0.0)
      {
       DebugPrint(StringFormat("Error: Invalid parameters. TickValue: %f, TickSize: %f", tickValue, tickSize));
-      return SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) > 0 ? SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) : 0.01;
+      return 0.0;
      }
 
    double moneyPerLot = (stopDistance / tickSize) * tickValue;
    if(moneyPerLot <= 0.0)
      {
       DebugPrint("Error: Calculated loss per lot is zero or negative.");
-      return SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) > 0 ? SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) : 0.01;
+      return 0.0;
      }
 
    double rawLot = riskAmount / moneyPerLot;
    double finalLot = NormalizeVolume(rawLot);
    
-   DebugPrint(StringFormat("Lot Calc: Balance=%.2f, Risk=%.2f, StopDist=%.1f, LossPerLot=%.2f, RawLot=%.5f, FinalLot=%.2f",
-                           balance, riskAmount, stopDistance, moneyPerLot, rawLot, finalLot));
+   double expectedLoss = finalLot * moneyPerLot;
+   double actualRiskPercent = (expectedLoss / balance) * 100.0;
+   
+   DebugPrint(StringFormat("Lot Calc: Balance=%.2f, TargetRisk=%.2f, StopDist=%.1f, LossPerLot=%.2f, RawLot=%.5f, FinalLot=%.2f, ActualRisk=%.2f%%",
+                           balance, riskAmount, stopDistance, moneyPerLot, rawLot, finalLot, actualRiskPercent));
                            
    return finalLot;
   }
@@ -753,7 +845,7 @@ DecisionContext RunTrendStrategy(const ENUM_POSITION_TYPE direction,const Indica
 DecisionContext SelectAndRunStrategy(const ENUM_POSITION_TYPE direction,const IndicatorSnapshot &snapshot,const bool isBarClose = false)
   {
    DecisionContext ctx;
-   bool sessionOk = (snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK);
+   bool sessionOk = (snapshot.session == SESSION_ASIAN || snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK);
    
    if(!sessionOk)
      {
@@ -782,7 +874,9 @@ DecisionContext SelectAndRunStrategy(const ENUM_POSITION_TYPE direction,const In
       return ctx;
      }
 
-   if(!snapshot.isHighVol)
+   if(snapshot.session == SESSION_ASIAN)
+      ctx = RunRangeStrategy(direction, snapshot, isBarClose);
+   else if(!snapshot.isHighVol)
       ctx = RunRangeStrategy(direction, snapshot, isBarClose);
    else if(snapshot.session == SESSION_LONDON)
       ctx = RunBreakoutStrategy(direction, snapshot, isBarClose);
@@ -823,7 +917,7 @@ DecisionContext SelectAndRunStrategy(const ENUM_POSITION_TYPE direction,const In
 DecisionContext PickBestDecision(const DecisionContext &buyContext,const DecisionContext &sellContext,const IndicatorSnapshot &snapshot)
   {
    DecisionContext result;
-   bool sessionOk  = (snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK);
+   bool sessionOk  = (snapshot.session == SESSION_ASIAN || snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK);
    
    result.valid    = false;
    result.type     = POSITION_TYPE_BUY;
@@ -946,32 +1040,62 @@ bool ExecuteTrade(const DecisionContext &context)
    if(!context.valid)
       return false;
 
-   double entryPrice = 0.0;
-   double sl = 0.0;
-   double tp = 0.0;
-   double riskDistance = context.atr * InpStopAtrMultiplier;
+   if(HasOpenPosition())
+     {
+      int totalCount = CountPositions(POSITION_TYPE_BUY) + CountPositions(POSITION_TYPE_SELL);
+      DebugPrint(StringFormat("Trade blocked: existing position already open. Current count: %d", totalCount));
+      LogToCSV("TRADE_BLOCKED",context.sessionName,context.strategyName,context.price,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"MAX_GLOBAL_POSITIONS");
+      return false;
+     }
 
-   if(context.type == POSITION_TYPE_BUY)
-     {
-      entryPrice = SymbolInfoDouble(InpTradeSymbol,SYMBOL_ASK);
-      sl = NormalizeDouble(entryPrice - riskDistance,g_symbolDigits);
-      tp = NormalizeDouble(entryPrice + context.atr * InpTakeProfitMultiplier,g_symbolDigits);
-      riskDistance = entryPrice - sl;
-     }
-   else if(context.type == POSITION_TYPE_SELL)
-     {
-      entryPrice = SymbolInfoDouble(InpTradeSymbol,SYMBOL_BID);
-      sl = NormalizeDouble(entryPrice + riskDistance,g_symbolDigits);
-      tp = NormalizeDouble(entryPrice - context.atr * InpTakeProfitMultiplier,g_symbolDigits);
-      riskDistance = sl - entryPrice;
-     }
+   double entryPrice = (context.type == POSITION_TYPE_BUY) ? SymbolInfoDouble(InpTradeSymbol,SYMBOL_ASK) : SymbolInfoDouble(InpTradeSymbol,SYMBOL_BID);
+   double originalSlDistance = context.atr * InpStopAtrMultiplier;
+   double riskDistance = originalSlDistance;
 
    double lot = CalculateLotSize(riskDistance, context.riskPercent);
    if(lot <= 0.0)
      {
-      DebugPrint("Trade skipped because lot calculation returned 0");
+      DebugPrint("Trade skipped because lot calculation returned 0 (Invalid parameters).");
       LogToCSV("TRADE_SKIPPED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"LOT_SIZE_ZERO");
       return false;
+     }
+     
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double maxRiskUSD = balance * (InpMaxAbsoluteRiskPercent / 100.0);
+   double tickSize   = SymbolInfoDouble(InpTradeSymbol,SYMBOL_TRADE_TICK_SIZE);
+   double tickValue  = SymbolInfoDouble(InpTradeSymbol,SYMBOL_TRADE_TICK_VALUE);
+   
+   double moneyPerLot = (riskDistance / tickSize) * tickValue;
+   double expectedLoss = lot * moneyPerLot;
+   
+   if(expectedLoss > maxRiskUSD && tickValue > 0.0 && lot > 0.0)
+     {
+      double maxSLTicks = maxRiskUSD / (tickValue * lot);
+      double adjustedSLDistance = maxSLTicks * tickSize;
+      
+      DebugPrint(StringFormat("SL adjusted to fit %g%% risk. Expected $%.2f > Max $%.2f. Shrinking SL %.2f -> %.2f points.", 
+                              InpMaxAbsoluteRiskPercent, expectedLoss, maxRiskUSD, riskDistance / _Point, adjustedSLDistance / _Point));
+      LogToCSV("SL_ADJUSTED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,StringFormat("OrigSL_%.2f_NewSL_%.2f", riskDistance, adjustedSLDistance));
+      
+      riskDistance = adjustedSLDistance;
+      expectedLoss = maxRiskUSD;
+     }
+     
+   double actualRiskPercent = (expectedLoss / balance) * 100.0;
+   double tpDistance = riskDistance * 3.0; // Enforce strict 1:3 RR
+   
+   double sl = 0.0;
+   double tp = 0.0;
+   
+   if(context.type == POSITION_TYPE_BUY)
+     {
+      sl = NormalizeDouble(entryPrice - riskDistance,g_symbolDigits);
+      tp = NormalizeDouble(entryPrice + tpDistance,g_symbolDigits);
+     }
+   else if(context.type == POSITION_TYPE_SELL)
+     {
+      sl = NormalizeDouble(entryPrice + riskDistance,g_symbolDigits);
+      tp = NormalizeDouble(entryPrice - tpDistance,g_symbolDigits);
      }
 
    ulong tradeId = NextTradeId();
@@ -994,12 +1118,23 @@ bool ExecuteTrade(const DecisionContext &context)
       return false;
      }
 
-   ulong ticket = FindPositionTicket(context.type);
+   ulong ticket = 0;
+   ulong resultDeal = trade.ResultDeal();
+   if(resultDeal > 0 && HistoryDealSelect(resultDeal))
+      ticket = (ulong)HistoryDealGetInteger(resultDeal,DEAL_POSITION_ID);
+
+   if(ticket == 0)
+      ticket = FindPositionTicketByComment(commentText);
+
+   if(ticket == 0)
+      ticket = FindPositionTicket(context.type);
+
    if(ticket > 0)
      {
       GlobalVariableSet(BuildStateKey("initrisk",ticket),riskDistance);
       GlobalVariableSet(BuildStateKey("partial",ticket),0.0);
       GlobalVariableSet(BuildStateKey("minprofit",ticket),0.0);
+      GlobalVariableSet(BuildStateKey("acclock",ticket),0.0);
       GlobalVariableSet(BuildStateKey("tradeid",ticket),(double)tradeId);
      }
 
@@ -1007,6 +1142,7 @@ bool ExecuteTrade(const DecisionContext &context)
       g_lastBuyBar = g_lastBarTime;
    else if(context.type == POSITION_TYPE_SELL)
       g_lastSellBar = g_lastBarTime;
+   g_lastTradeTime = TimeTradeServer();
       
    DrawTradeArrow(tradeId, context.type, context.isCounterTrend, entryPrice);
 
@@ -1016,8 +1152,8 @@ bool ExecuteTrade(const DecisionContext &context)
    if(InpEnablePushAlerts || InpEnableEmailAlerts)
      {
       string alertSubject = StringFormat("GoldEA %s %s Executed", context.strategyName, context.decision);
-      string alertMsg = StringFormat("Action: %s %s\nType: %s\nRisk: %.2f%%\nLot: %.2f\nEntry: %.2f\nSL: %.2f\nTP: %.2f\nScore: %d",
-                                     context.decision, InpTradeSymbol, context.strategyName, context.riskPercent, lot, entryPrice, sl, tp, context.score);
+      string alertMsg = StringFormat("Action: %s %s\nType: %s\nActual Risk: %.2f%%\nLot: %.2f\nEntry: %.2f\nSL: %.2f\nTP Dist: %.2f points\nScore: %d",
+                                     context.decision, InpTradeSymbol, context.strategyName, actualRiskPercent, lot, entryPrice, sl, tpDistance / _Point, context.score);
       if(InpEnablePushAlerts) SendNotification(alertSubject + "\n" + alertMsg);
       if(InpEnableEmailAlerts) SendMail(alertSubject, alertMsg);
      }
@@ -1041,6 +1177,8 @@ void ManageTrade(const ulong ticket, const bool isNewBar)
    double currentSl        = PositionGetDouble(POSITION_SL);
    double currentTp        = PositionGetDouble(POSITION_TP);
    double volume           = PositionGetDouble(POSITION_VOLUME);
+   double profitMoney      = PositionGetDouble(POSITION_PROFIT);
+   double balance          = AccountInfoDouble(ACCOUNT_BALANCE);
 
    IndicatorSnapshot snapshot;
    if(!CalculateIndicators(snapshot,0))
@@ -1062,6 +1200,53 @@ void ManageTrade(const ulong ticket, const bool isNewBar)
    double profitDistance = (type == POSITION_TYPE_BUY) ? (priceNow - openPrice)
                                                        : (openPrice - priceNow);
    double rMultiple = profitDistance / initialRisk;
+
+   string accLockKey = BuildStateKey("acclock",ticket);
+   bool isAccLockActive = (GlobalVariableCheck(accLockKey) && GlobalVariableGet(accLockKey) >= 1.0);
+   
+   if(!isAccLockActive && InpAccountProfitLockTriggerPercent > 0.0)
+     {
+      double triggerMoney = balance * (InpAccountProfitLockTriggerPercent / 100.0);
+      if(profitMoney >= triggerMoney)
+        {
+         double targetMoney = balance * (InpAccountProfitLockTargetPercent / 100.0);
+         double tickSize   = SymbolInfoDouble(InpTradeSymbol,SYMBOL_TRADE_TICK_SIZE);
+         double tickValue  = SymbolInfoDouble(InpTradeSymbol,SYMBOL_TRADE_TICK_VALUE);
+         
+         if(tickSize > 0.0 && tickValue > 0.0 && volume > 0.0)
+           {
+            double priceDiff = (targetMoney * tickSize) / (tickValue * volume);
+            double newSl = 0.0;
+            bool needsBeModify = false;
+            
+            if(type == POSITION_TYPE_BUY)
+              {
+               newSl = NormalizeDouble(openPrice + priceDiff, g_symbolDigits);
+               if(currentSl < newSl || currentSl == 0.0) needsBeModify = true;
+              }
+            else if(type == POSITION_TYPE_SELL)
+              {
+               newSl = NormalizeDouble(openPrice - priceDiff, g_symbolDigits);
+               if(currentSl > newSl || currentSl == 0.0) needsBeModify = true;
+              }
+
+            if(needsBeModify)
+              {
+               if(trade.PositionModify(ticket,newSl,currentTp))
+                 {
+                  GlobalVariableSet(accLockKey,1.0);
+                  DebugPrint(StringFormat("Account profit lock moved for ticket=%I64u",ticket));
+                  string reasonStr = StringFormat("PROFIT_$%.2f_SL_%.2f", profitMoney, newSl);
+                  LogToCSV("ACCOUNT_PROFIT_LOCK",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),reasonStr);
+                 }
+              }
+            else
+              {
+               GlobalVariableSet(accLockKey,1.0);
+              }
+           }
+        }
+     }
 
    string trailStartKey = BuildStateKey("trailstart",ticket);
    bool isTrailActive = (GlobalVariableCheck(trailStartKey) && GlobalVariableGet(trailStartKey) >= 1.0);
@@ -1117,7 +1302,7 @@ void ManageTrade(const ulong ticket, const bool isNewBar)
          GlobalVariableSet(partialKey,1.0);
      }
 
-   if(!isTrailActive && profitDistance >= snapshot.atr * InpTrailActivationAtrMultiplier)
+   if(!isTrailActive && (profitDistance >= snapshot.atr * InpTrailActivationAtrMultiplier || (GlobalVariableCheck(accLockKey) && GlobalVariableGet(accLockKey) >= 1.0)))
      {
       isTrailActive = true;
       GlobalVariableSet(trailStartKey,1.0);
@@ -1229,8 +1414,24 @@ void EvaluateEntries()
       sellContext.reason = "SELL_DISABLED";
      }
      
+   if(HasOpenPosition())
+     {
+      buyContext.valid = false;
+      buyContext.reason = "MAX_GLOBAL_TRADES_REACHED";
+      sellContext.valid = false;
+      sellContext.reason = "MAX_GLOBAL_TRADES_REACHED";
+     }
+     
+   if(TimeTradeServer() - g_lastTradeTime < InpTradeCooldownSeconds)
+     {
+      buyContext.valid = false;
+      buyContext.reason = "COOLDOWN_ACTIVE";
+      sellContext.valid = false;
+      sellContext.reason = "COOLDOWN_ACTIVE";
+     }
+
    int buyCount = CountPositions(POSITION_TYPE_BUY);
-   if(buyCount >= InpMaxConcurrentTrades)
+   if(HasBuyPosition())
      {
       buyContext.valid = false;
       buyContext.reason = "MAX_BUY_TRADES_REACHED";
@@ -1242,7 +1443,7 @@ void EvaluateEntries()
      }
      
    int sellCount = CountPositions(POSITION_TYPE_SELL);
-   if(sellCount >= InpMaxConcurrentTrades)
+   if(HasSellPosition())
      {
       sellContext.valid = false;
       sellContext.reason = "MAX_SELL_TRADES_REACHED";
@@ -1298,8 +1499,24 @@ void EvaluateTickAndDashboard()
       sellContext.reason = "SELL_DISABLED";
      }
      
+   if(HasOpenPosition())
+     {
+      buyContext.valid = false;
+      buyContext.reason = "MAX_GLOBAL_TRADES_REACHED";
+      sellContext.valid = false;
+      sellContext.reason = "MAX_GLOBAL_TRADES_REACHED";
+     }
+     
+   if(TimeTradeServer() - g_lastTradeTime < InpTradeCooldownSeconds)
+     {
+      buyContext.valid = false;
+      buyContext.reason = "COOLDOWN_ACTIVE";
+      sellContext.valid = false;
+      sellContext.reason = "COOLDOWN_ACTIVE";
+     }
+
    int buyCount = CountPositions(POSITION_TYPE_BUY);
-   if(buyCount >= InpMaxConcurrentTrades)
+   if(HasBuyPosition())
      {
       buyContext.valid = false;
       buyContext.reason = "MAX_BUY_TRADES_REACHED";
@@ -1311,7 +1528,7 @@ void EvaluateTickAndDashboard()
      }
      
    int sellCount = CountPositions(POSITION_TYPE_SELL);
-   if(sellCount >= InpMaxConcurrentTrades)
+   if(HasSellPosition())
      {
       sellContext.valid = false;
       sellContext.reason = "MAX_SELL_TRADES_REACHED";
@@ -1354,6 +1571,7 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetTypeFillingBySymbol(InpTradeSymbol);
 
+   RebuildAsianRangeFromHistory();
    CleanupOldLogs();
 
    DebugPrint(StringFormat("EA initialized on %s timeframe=%d",InpTradeSymbol,InpTimeframe));

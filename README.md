@@ -1,10 +1,21 @@
-# XAUUSDm Adaptive Multi-Factor EA for MT5
+# XAUUSDm MetaTrader 5 Expert Advisors
 
-This project contains a MetaTrader 5 Expert Advisor (EA) for trading `XAUUSDm` (gold) using a multi-factor strategy tuned for `M5` execution.
+This project contains three MetaTrader 5 Expert Advisors (EAs) for trading `XAUUSDm` (gold):
+1. **M5 Adaptive Multi-Factor EA**: A dynamic session-based swing/trend trading system.
+2. **M1 High-Frequency Scalper EA**: An aggressive, strict-RR scalping system for rapid growth.
+3. **M5 Beginner Trend Pullback EA**: A simplified learning version with fewer moving parts.
 
-The EA combines:
+Current version identifiers:
+- `XAUUSD_Adaptive_MultiFactor_EA.mq5`: `M5 Version 4`
+- `XAUUSD_M1_Scalper_EA.mq5`: `M1 Version 1`
+- `XAUUSD_Beginner_Trend_Pullback_EA.mq5`: beginner support EA
 
-- Dynamic EMA trend filters with current defaults of `21 EMA` and `100 EMA`
+## EA 1: M5 Adaptive Multi-Factor EA
+
+Version: `M5 Version 4`
+
+The M5 EA combines:
+ - Dynamic EMA trend filters with current defaults of `21 EMA` and `100 EMA`
 - Momentum filter with `RSI`
 - Volatility filter with `ATR`
 - Bollinger Bands for range detection
@@ -64,6 +75,8 @@ It then applies:
 The EA uses adaptive risk management.
 
 - Risk per trade: `1%` of account balance by default
+- Absolute risk cap: controlled with `InpMaxAbsoluteRiskPercent`
+- Counter-trend setups can be allowed with separate risk and score requirements
 - Stop loss: `1.8 x ATR`
 - Take profit: `3.0 x ATR` (focused on larger R:R targets)
 - Lot size is calculated automatically from stop-loss distance
@@ -77,11 +90,14 @@ After a trade is opened, the EA manages it automatically:
 
 - Locks a minimal profit of `0.3 x ATR` when profit reaches `1.2 x ATR`
 - Closes `50%` of the position at `1.5R`
+- **Account Profit Lock:** Secures target profit % (e.g., 1%) when account profit reaches trigger % (e.g., 5%)
 - Delays trailing until profit reaches `2.0 x ATR`
 - Uses a `2.5 x ATR` trailing stop distance to let the trend breathe, **updated strictly on new bars**
 - Mandates a minimum trailing step of `0.5 x ATR` to filter market noise
 - **Profit Lock:** Automatically locks `1.0 x ATR` in secured profit once a trade reaches a `2.5 x ATR` profit margin
-- Keeps only one buy and one sell position at a time
+- **Trade Cooldown:** Prevents rapid re-entry by requiring a minimum wait time between trades
+- Global open positions are limited by `InpMaxOpenPositionsTotal`
+- Same-direction stacking is controlled by `InpMaxConcurrentTrades`
 
 ## 5. Built-In Filters
 
@@ -91,6 +107,7 @@ To avoid bad trading conditions, the EA includes:
 - Session filter
 - Minimum ATR filter
 - Duplicate signal protection
+- Global position limiting (prevents overtrading when signals repeat)
 - Magic number isolation
 
 By default, it only trades during:
@@ -123,6 +140,8 @@ This helps reduce weaker setups.
 ## 7. Project Files
 
 - [XAUUSD_Adaptive_MultiFactor_EA.mq5](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_MultiFactor_EA.mq5)
+- [XAUUSD_M1_Scalper_EA.mq5](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_EA.mq5)
+- [XAUUSD_M1_Scalper_README.md](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_README.md)
 - [XAUUSD_Beginner_Trend_Pullback_EA.mq5](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Beginner_Trend_Pullback_EA.mq5)
 - [XAUUSD_Exness_Starter_Preset.txt](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Exness_Starter_Preset.txt)
 - [OPTIMIZATION_CHECKLIST.md](C:\Users\bhara\OneDrive\Documents\Auto-trading code\OPTIMIZATION_CHECKLIST.md)
@@ -133,6 +152,8 @@ This helps reduce weaker setups.
 Use the file that matches your stage:
 
 - Use `XAUUSD_Adaptive_MultiFactor_EA.mq5` if you want the full strategy with scoring and advanced trade management
+- Use `XAUUSD_M1_Scalper_EA.mq5` if you want the dedicated M1 momentum scalper
+- Use `XAUUSD_Beginner_Trend_Pullback_EA.mq5` if you want the simpler M5 learning version
 - Use `XAUUSD_Exness_Starter_Preset.txt` as a starting input guide for Exness
 - Use `OPTIMIZATION_CHECKLIST.md` when tuning settings in Strategy Tester
 
@@ -144,14 +165,26 @@ Follow these steps carefully.
 2. Click `File -> Open Data Folder`.
 3. Open the folder `MQL5`.
 4. Open the folder `Experts`.
-5. Copy `XAUUSD_Adaptive_MultiFactor_EA.mq5` into the `Experts` folder.
-6. Open `MetaEditor`.
-7. In MetaEditor, find the EA under `Experts`.
-8. Open the file and press `Compile`.
-9. Go back to MT5.
-10. In the `Navigator` panel, refresh `Expert Advisors`.
-11. Drag the EA onto an `XAUUSDm` chart.
-12. Enable `Algo Trading`.
+5. Copy the EA file you want to use into the `Experts` folder.
+6. Recommended choices:
+
+- `XAUUSD_Adaptive_MultiFactor_EA.mq5` for the full M5 multi-factor system
+- `XAUUSD_M1_Scalper_EA.mq5` for the dedicated M1 scalper
+- `XAUUSD_Beginner_Trend_Pullback_EA.mq5` for the simpler M5 version
+
+7. Open `MetaEditor`.
+8. In MetaEditor, find the EA under `Experts`.
+9. Open the file and press `Compile`.
+10. Go back to MT5.
+11. In the `Navigator` panel, refresh `Expert Advisors`.
+12. Drag the EA onto an `XAUUSDm` chart.
+13. Match the chart timeframe to the EA design:
+
+- `M5` for `XAUUSD_Adaptive_MultiFactor_EA.mq5`
+- `M1` for `XAUUSD_M1_Scalper_EA.mq5`
+- `M5` for `XAUUSD_Beginner_Trend_Pullback_EA.mq5`
+
+14. Enable `Algo Trading`.
 
 ## 9. Important Exness Setup Notes
 
@@ -225,8 +258,24 @@ These are the most important settings you can optimize.
 ### Risk Settings
 
 - `InpRiskPercent`
+- `InpMaxAbsoluteRiskPercent`
+- `InpAllowCounterTrend`
+- `InpCounterTrendRisk`
+- `InpCounterTrendMinScore`
+- `InpMaxOpenPositionsTotal`
+- `InpMaxConcurrentTrades`
+- `InpTradeCooldownSeconds`
 - `InpStopAtrMultiplier`
 - `InpTakeProfitMultiplier`
+- `InpBreakevenAtrMultiplier`
+- `InpMinProfitLockAtr`
+- `InpAccountProfitLockTriggerPercent`
+- `InpAccountProfitLockTargetPercent`
+- `InpTrailActivationAtrMultiplier`
+- `InpCounterTrendTpMultiplier`
+- `InpTrailStepAtrMultiplier`
+- `InpProfitLockActivationAtr`
+- `InpProfitLockAtr`
 - `InpTrailAtrMultiplier`
 
 ### Trade Filters
@@ -475,28 +524,62 @@ How to view the dashboard:
 2. Attach the EA to a chart.
 3. The decision line now shows whether the result is `LIVE_PREVIEW` or `BAR_CLOSE_SIGNAL`.
 
-## Known Limitations / Future Improvements
+---
 
-### Lot Size & Risk Scaling (Deferred Improvement)
+## EA 2: M1 High-Frequency Scalper EA
 
-Current behavior:
+Version: `M1 Version 1`
 
-* The EA forces minimum lot size (0.01) when calculated lot is below broker minimum.
+This is a dedicated high-frequency Expert Advisor engineered strictly for the **M1 timeframe** on XAUUSD. It leverages explosive short-term momentum using high-risk (up to 10%), high-reward (1:3 RR) principles to rapidly scale small account balances.
 
-Impact:
+### Core Mechanics
 
-* Risk per trade is not perfectly aligned with account size.
-* Backtest and live results may slightly overestimate risk consistency.
+#### 1. The Strategy (EMA + RSI Momentum Pullbacks)
+Unlike the multi-factor EA, this system relies purely on split-second momentum and deep pullbacks:
+- **Trend Confirmation:** Price must be on the correct side of the `EMA 50`.
+- **Momentum Burst:** `EMA 20` must have crossed the `EMA 50` aggressively.
+- **Trend Strength (NEW):** The gap between EMA20 and EMA50 must exceed `InpMinEmaGapPoints` to avoid flat/choppy markets.
+- **Volatility Filter (NEW):** The ATR must exceed `150 points` to guarantee the market has enough energy to reach the 1:3 RR target.
+- **RSI Velocity:** RSI(14) must reside in a strong but non-exhausted zone (`50-70` for Buys, `30-50` for Sells).
+- **Candle Confirmation (NEW):** The signal candle must close in the direction of the trend (Bullish for Buys, Bearish for Sells).
+- **The Trigger:** The actual entry is sparked when price sharply pulls back toward the `EMA 20`, entering at a mathematical discount while the trend holds.
 
-Reason for deferring fix:
+#### 2. Risk Engine & SL Shrinking
+Trading small accounts ($100) mathematically conflicts with Gold's standard contract limits (`0.01` min lot). This usually results in small accounts assuming 20%+ risk.
 
-* Current trading capital is small.
-* Maintaining execution consistency is prioritized over strict risk precision.
-* Skipping trades or dynamically adjusting SL would reduce system activity.
+To achieve exactly 10% risk without missing setups:
+- The EA calculates expected loss at `0.01` lots.
+- If the expected loss exceeds your defined 10% cash equivalent, the EA **DOES NOT reject the trade**.
+- Instead, it recalculates and **shrinks the physical Stop Loss** closer to the entry price until the maximum loss guarantees exactly 10% risk.
 
-Future plan:
+#### 3. The 1:3 RR Mandate
+This EA forces a strict `1:3 Reward-to-Risk` target on every trade. 
+If the Stop Loss is dynamically shrunk to protect the account, the Take Profit distance is simultaneously derived from the newly shrunk SL size to preserve exactly 1:3 RR.
 
-* Implement dynamic position sizing:
-  Option 1: Adjust stop loss distance to match risk
-  Option 2: Skip trades when minimum lot violates risk rules
-* Revisit once account balance increases.
+#### 4. Trade Management
+Profits on the M1 timeframe evaporate in seconds. To prevent profitable strikes from reversing:
+- **The 5% Account Trigger:** The EA monitors the live monetary profit of the trade.
+- **The 1% Lock:** The absolute millisecond profit hits 5% of the total account balance, the SL is dragged deep into profit to permanently secure 1% of the account.
+- **ATR Trailing:** Once the 1% buffer is locked, the EA activates a trailing stop using an ATR Multiplier to squeeze every last drop out of runaway momentum spikes.
+
+#### 5. Additional Filters
+- **Session Filter:** Only trades during London (08:00–13:00) and New York (13:00–22:00) sessions, avoiding Asian session spread spikes.
+- **Dynamic Spread Filter:** Maximum spread is dynamically clamped to `0.5 x ATR` (capped by `InpMaxSpreadPoints`), ensuring trades only execute when the spread is a tiny fraction of the expected movement.
+
+#### Visuals & Logging
+- The EA perfectly inherits the **Visual Dashboard** and **CSV Logging Engine** from the M5 Adaptive EA.
+- It generates a 0–100 pseudo-score based on its M1 internal conditions (Trend + Momentum + RSI + Pullback + Gap + Candle) for seamless visual parity.
+- Uses identical `[GoldEA]` prefix formatting and `DecisionContext` logic so your log files remain consistently readable.
+
+## EA 3: M5 Beginner Trend Pullback EA
+
+This is the simple training-wheel version of the project for traders who want cleaner logic before using the advanced engines.
+
+- Timeframe: `M5`
+- Trend filter: fast EMA vs slow EMA
+- Momentum filter: RSI zones
+- Volatility filter: minimum ATR
+- Risk model: fixed percentage risk with ATR stop and ATR-based target
+- Session filter: London and New York windows only
+
+Use this file when you want a smaller codebase that is easier to audit and backtest.
