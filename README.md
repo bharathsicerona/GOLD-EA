@@ -142,6 +142,12 @@ This helps reduce weaker setups.
 - [XAUUSD_Adaptive_MultiFactor_EA.mq5](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_MultiFactor_EA.mq5)
 - [XAUUSD_M1_Scalper_EA.mq5](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_EA.mq5)
 - [XAUUSD_M1_Scalper_README.md](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_README.md)
+- [XAUUSD_M1_Scalper_Inputs.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_Inputs.mqh)
+- [XAUUSD_M1_Scalper_Indicators.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_Indicators.mqh)
+- [XAUUSD_M1_Scalper_Risk.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_Risk.mqh)
+- [XAUUSD_M1_Scalper_Entry.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_Entry.mqh)
+- [XAUUSD_M1_Scalper_Logging.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_Logging.mqh)
+- [XAUUSD_M1_Scalper_Management.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_Management.mqh)
 - [XAUUSD_Beginner_Trend_Pullback_EA.mq5](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Beginner_Trend_Pullback_EA.mq5)
 - [XAUUSD_Exness_Starter_Preset.txt](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Exness_Starter_Preset.txt)
 - [OPTIMIZATION_CHECKLIST.md](C:\Users\bhara\OneDrive\Documents\Auto-trading code\OPTIMIZATION_CHECKLIST.md)
@@ -156,6 +162,7 @@ Use the file that matches your stage:
 - Use `XAUUSD_Beginner_Trend_Pullback_EA.mq5` if you want the simpler M5 learning version
 - Use `XAUUSD_Exness_Starter_Preset.txt` as a starting input guide for Exness
 - Use `OPTIMIZATION_CHECKLIST.md` when tuning settings in Strategy Tester
+- Keep the M1 `.mqh` support files beside `XAUUSD_M1_Scalper_EA.mq5` when compiling the split M1 EA
 
 ## 8. How to Install the EA in MT5
 
@@ -570,6 +577,8 @@ Profits on the M1 timeframe evaporate in seconds. To prevent profitable strikes 
 - The EA perfectly inherits the **Visual Dashboard** and **CSV Logging Engine** from the M5 Adaptive EA.
 - It generates a 0–100 pseudo-score based on its M1 internal conditions (Trend + Momentum + RSI + Pullback + Gap + Candle) for seamless visual parity.
 - Uses identical `[GoldEA]` prefix formatting and `DecisionContext` logic so your log files remain consistently readable.
+- Uses its own daily CSV file format: `GoldEA_M1_Log_YYYYMMDD.csv`
+- The split M1 version depends on the local `.mqh` support modules in this folder
 
 ## EA 3: M5 Beginner Trend Pullback EA
 
