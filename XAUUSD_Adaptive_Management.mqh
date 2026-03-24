@@ -556,4 +556,34 @@ void EvaluateTickAndDashboard()
       LogToCSV("LIVE_TICK_PREVIEW",current.sessionName,current.strategyName,current.price,current.rsi,current.ema50,current.ema200,current.atr,current.spread,current.score,current.decision,current.reason);
   }
 
+void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
+  {
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal <= 0)
+      return;
+
+   if(!HistoryDealSelect(trans.deal))
+      return;
+
+   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != InpTradeSymbol)
+      return;
+
+   if((ulong)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagicNumber)
+      return;
+
+   ENUM_DEAL_ENTRY entryType = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   if(entryType != DEAL_ENTRY_OUT)
+      return;
+
+   double netProfit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
+                    + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
+                    + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
+
+   if(netProfit < 0.0)
+      Print(StringFormat("[GoldEA-M5] TRADE_RESULT: LOSS profit=%.2f", netProfit));
+   else if(netProfit > 0.0)
+      Print(StringFormat("[GoldEA-M5] TRADE_RESULT: WIN profit=%.2f", netProfit));
+   else
+      Print(StringFormat("[GoldEA-M5] TRADE_RESULT: BREAKEVEN profit=%.2f", netProfit));
+  }
+
 #endif // XAUUSD_ADAPTIVE_MANAGEMENT_MQH

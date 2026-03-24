@@ -79,13 +79,14 @@ DecisionContext RunScalperStrategy(const ENUM_POSITION_TYPE direction, const boo
    ctx.isCounterTrend = false;
    ctx.riskPercent = InpMaxRiskPercent;
 
-   bool sessionOk = (currentSession == SESSION_LONDON || currentSession == SESSION_NEWYORK || (InpEnableAsianSession && currentSession == SESSION_ASIAN));
-   if(!sessionOk)
+   bool isAsianBlockedSession = (currentSession == SESSION_ASIAN && !InpEnableAsianSession);
+   bool isCoreSession = (currentSession == SESSION_LONDON || currentSession == SESSION_NEWYORK || currentSession == SESSION_ASIAN);
+   if(!isCoreSession)
      {
       ctx.status = "BLOCKED";
       ctx.spread = SymbolInfoInteger(InpTradeSymbol, SYMBOL_SPREAD);
       ctx.valid = false;
-      ctx.reason = (currentSession == SESSION_ASIAN && !InpEnableAsianSession) ? "ASIAN_DISABLED" : "SESSION_BLOCKED";
+      ctx.reason = "SESSION_BLOCKED";
       if(isBarClose)
          DebugPrint(StringFormat("[%s] %s check: price=%.2f reason=%s", ctx.strategyName, PositionTypeText(direction), ctx.price, ctx.reason));
       return ctx;
@@ -162,16 +163,19 @@ DecisionContext RunScalperStrategy(const ENUM_POSITION_TYPE direction, const boo
    
    ctx.score = rawScore;
    bool volOk = (atrValue / _Point >= InpMinAtrPoints);
-   bool structureOk = trendOk && momOk && rsiOk && pullOk && candleOk && emaGapOk;
+   bool sessionOk = (!isAsianBlockedSession || ctx.score >= 90);
+   bool trendAdaptiveOk = ((trendOk && momOk) || ctx.score >= 80);
+   bool candleAdaptiveOk = (candleOk || ctx.score >= 80);
+   bool structureOk = trendAdaptiveOk && rsiOk && pullOk && candleAdaptiveOk && emaGapOk;
    
-   // Strict gate: Only allows execution if everything is physically flawless
-   ctx.valid = spreadOk && volOk && structureOk;
+   ctx.valid = sessionOk && spreadOk && volOk && structureOk;
 
-   if(!spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
+   if(!sessionOk) ctx.reason = "ASIAN_DISABLED";
+   else if(!spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
    else if(!volOk) ctx.reason = "WEAK_VOLATILITY";
    else if(!emaGapOk) ctx.reason = "WEAK_TREND";
-   else if(!trendOk || !momOk) ctx.reason = "UNSTABLE_TREND";
-   else if(!candleOk) ctx.reason = "NO_CANDLE_CONFIRM";
+   else if(!(trendOk && momOk) && ctx.score < 80) ctx.reason = "UNSTABLE_TREND";
+   else if(!candleOk && ctx.score < 80) ctx.reason = "NO_CANDLE_CONFIRM";
    else if(!structureOk) ctx.reason = "TREND_STRUCTURE_FAIL";
    else ctx.reason = "SETUP_VALID";
 

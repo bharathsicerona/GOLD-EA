@@ -127,11 +127,17 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       g_consecutiveLosses++;
       g_lastLossTime = TimeTradeServer();
       DebugPrint(StringFormat("Loss recorded. Consecutive losses=%d net=%.2f", g_consecutiveLosses, netProfit));
+      Print(StringFormat("[GoldEA-M1] TRADE_RESULT: LOSS profit=%.2f", netProfit));
      }
    else if(netProfit > 0.0)
      {
       g_consecutiveLosses = 0;
       DebugPrint(StringFormat("Winning trade recorded. Consecutive losses reset. net=%.2f", netProfit));
+      Print(StringFormat("[GoldEA-M1] TRADE_RESULT: WIN profit=%.2f", netProfit));
+     }
+   else
+     {
+      Print(StringFormat("[GoldEA-M1] TRADE_RESULT: BREAKEVEN profit=%.2f", netProfit));
      }
   }
 

@@ -13,32 +13,13 @@ datetime g_tradeMinuteStamp = 0;
 int      g_tradesThisMinute = 0;
 int      g_consecutiveLosses = 0;
 
-// Forward declarations
-void DebugPrint(const string message);
-
 #include "XAUUSD_M1_Scalper_Inputs.mqh"
+#include "GoldEA_Common_Core.mqh"
 #include "XAUUSD_M1_Scalper_Indicators.mqh"
 #include "XAUUSD_M1_Scalper_Entry.mqh"
 #include "XAUUSD_M1_Scalper_Risk.mqh"
 #include "XAUUSD_M1_Scalper_Logging.mqh"
 #include "XAUUSD_M1_Scalper_Management.mqh"
-
-string BuildGlobalKey(const string label)
-  {
-   return StringFormat("EA_%I64u_%s",InpMagicNumber,label);
-  }
-
-ulong NextTradeId()
-  {
-   string key = BuildGlobalKey("TradeCounter");
-   double current = 0.0;
-   if(GlobalVariableCheck(key))
-      current = GlobalVariableGet(key);
-
-   current += 1.0;
-   GlobalVariableSet(key,current);
-   return (ulong)current;
-  }
   
 bool HasOpenPosition()
   {

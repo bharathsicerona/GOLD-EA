@@ -5,6 +5,10 @@ This project contains three MetaTrader 5 Expert Advisors (EAs) for trading `XAUU
 2. **M1 High-Frequency Scalper EA**: An aggressive, strict-RR scalping system for rapid growth.
 3. **M5 Beginner Trend Pullback EA**: A simplified learning version with fewer moving parts.
 
+Shared support and analysis tools:
+- `GoldEA_Common_Core.mqh`: shared helper layer reused by the split M1 and M5 EAs
+- `analyze_ea_logs.py`: Python log-analysis tool for MT5 backtest and EA log review
+
 Current version identifiers:
 - `XAUUSD_Adaptive_MultiFactor_EA.mq5`: `M5 Version 4`
 - `XAUUSD_M1_Scalper_EA.mq5`: `M1 Version 1`
@@ -140,6 +144,8 @@ This helps reduce weaker setups.
 ## 7. Project Files
 
 - [XAUUSD_Adaptive_MultiFactor_EA.mq5](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_MultiFactor_EA.mq5)
+- [GoldEA_Common_Core.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\GoldEA_Common_Core.mqh)
+- [analyze_ea_logs.py](C:\Users\bhara\OneDrive\Documents\Auto-trading code\analyze_ea_logs.py)
 - [XAUUSD_Adaptive_Inputs.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_Inputs.mqh)
 - [XAUUSD_Adaptive_Indicators.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_Indicators.mqh)
 - [XAUUSD_Adaptive_Entry.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_Entry.mqh)
@@ -165,11 +171,13 @@ Use the file that matches your stage:
 
 - Use `XAUUSD_Adaptive_MultiFactor_EA.mq5` if you want the full strategy with scoring and advanced trade management
 - Keep the M5 `.mqh` support files beside `XAUUSD_Adaptive_MultiFactor_EA.mq5` when compiling the split M5 EA
+- Keep `GoldEA_Common_Core.mqh` beside both split EAs because it now holds shared utility helpers used by M1 and M5
 - Use `XAUUSD_M1_Scalper_EA.mq5` if you want the dedicated M1 momentum scalper
 - Use `XAUUSD_Beginner_Trend_Pullback_EA.mq5` if you want the simpler M5 learning version
 - Use `XAUUSD_Exness_Starter_Preset.txt` as a starting input guide for Exness
 - Use `OPTIMIZATION_CHECKLIST.md` when tuning settings in Strategy Tester
 - Keep the M1 `.mqh` support files beside `XAUUSD_M1_Scalper_EA.mq5` when compiling the split M1 EA
+- Use `analyze_ea_logs.py` if you want to turn MT5 `.log` and `.txt` files into signal, rejection, and session insights
 
 ## 8. How to Install the EA in MT5
 
@@ -185,6 +193,10 @@ Follow these steps carefully.
 - `XAUUSD_Adaptive_MultiFactor_EA.mq5` for the full M5 multi-factor system
 - `XAUUSD_M1_Scalper_EA.mq5` for the dedicated M1 scalper
 - `XAUUSD_Beginner_Trend_Pullback_EA.mq5` for the simpler M5 version
+
+Important:
+
+- If you use the split M5 or M1 EA, copy `GoldEA_Common_Core.mqh` together with the EA-specific `.mqh` files into the same `Experts` folder location before compiling
 
 7. Open `MetaEditor`.
 8. In MetaEditor, find the EA under `Experts`.
@@ -587,6 +599,19 @@ Profits on the M1 timeframe evaporate in seconds. To prevent profitable strikes 
 - Uses its own daily CSV file format: `GoldEA_M1_Log_YYYYMMDD.csv`
 - The split M1 version depends on the local `.mqh` support modules in this folder
 
+### Current M1 Update Notes
+
+The latest M1 code includes the following practical changes beyond the older overview above:
+
+- Dynamic lot sizing is equity-based and no longer relies on stop-loss compression
+- Margin is validated before order placement
+- Cooldown after losses is enforced
+- Consecutive-loss blocking is supported
+- Max-trades-per-minute protection is supported
+- Asian-session trading can be disabled with input control
+- Trailing updates are throttled using ATR step logic instead of updating every tick
+- Shared utilities now live in `GoldEA_Common_Core.mqh`
+
 ## EA 3: M5 Beginner Trend Pullback EA
 
 This is the simple training-wheel version of the project for traders who want cleaner logic before using the advanced engines.
@@ -599,3 +624,141 @@ This is the simple training-wheel version of the project for traders who want cl
 - Session filter: London and New York windows only
 
 Use this file when you want a smaller codebase that is easier to audit and backtest.
+
+## EA Log Analyzer
+
+The repository now includes a Python log-analysis tool:
+
+- [analyze_ea_logs.py](C:\Users\bhara\OneDrive\Documents\Auto-trading code\analyze_ea_logs.py)
+
+Purpose:
+
+- Parse MT5 `.log` and `.txt` files that contain GoldEA output
+- Extract timestamps, side, score, ATR, reason, and execution/management events
+- Summarize total signals, executed trades, skipped trades, session activity, and common rejection reasons
+- Export structured event data and summary files for deeper review
+
+Supported log patterns include lines such as:
+
+- `[GoldEA] [TREND] BUY check: price=..., atr=..., score=..., reason=...`
+- `[GoldEA] BUY executed: tradeId=...`
+- `[GoldEA] Trade skipped`
+- `[GoldEA] STOP LOSS HIT`
+- `[GoldEA] TAKE PROFIT HIT`
+- `[GoldEA] Trailing stop updated for ticket=...`
+
+How to run:
+
+```bash
+python analyze_ea_logs.py logs
+python analyze_ea_logs.py logs --export-summary-csv logs\ea_log_summary.csv --export-events-csv logs\ea_log_events.csv --export-json logs\ea_log_report.json
+```
+
+What it calculates:
+
+- Total signals
+- Trades executed
+- Trades skipped
+- Win rate and loss rate when explicit outcome lines are present
+- Average score for executed trades
+- Average ATR
+- Most common rejection reasons
+- Session grouping: Asian, London, New York, Off Session
+
+Important note:
+
+- If the EA logs do not include explicit `STOP LOSS HIT` or `TAKE PROFIT HIT` lines, the analyzer can still summarize signals and executions, but win/loss resolution will remain incomplete.
+
+Generated example outputs:
+
+- [ea_log_summary.csv](C:\Users\bhara\OneDrive\Documents\Auto-trading code\logs\ea_log_summary.csv)
+- [ea_log_events.csv](C:\Users\bhara\OneDrive\Documents\Auto-trading code\logs\ea_log_events.csv)
+- [ea_log_report.json](C:\Users\bhara\OneDrive\Documents\Auto-trading code\logs\ea_log_report.json)
+
+## Current Consolidated Notes
+
+This `README.md` is now the primary project documentation for:
+
+- M5 adaptive EA
+- M1 scalper EA
+- beginner M5 EA
+- shared common include layer
+- Python log analyzer
+
+### Shared Code Structure
+
+The split M1 and M5 EAs now share:
+
+- [GoldEA_Common_Core.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\GoldEA_Common_Core.mqh)
+
+Shared helpers include:
+
+- debug printing
+- current-time formatting
+- global-state key builders
+- trade ID generator
+- volume normalization
+- generic indicator buffer reads
+- dashboard label creation
+- log cleanup helpers
+
+### Adaptive Filter Update
+
+The latest filter update was designed to increase execution rate without changing the underlying strategy model or the risk engine.
+
+#### M1 adaptive changes
+
+- Asian session is no longer a hard block for every setup
+- If `InpEnableAsianSession = false`, strong Asian setups are still allowed when score is at least `90`
+- Candle confirmation is no longer an absolute rejection for high-quality setups
+- If candle confirmation fails but score is at least `80`, the setup can still pass
+- Trend instability is treated more flexibly for higher-scoring setups instead of being an automatic stop every time
+
+#### M5 adaptive changes
+
+- Range trades are no longer blocked by a single absolute structure failure
+- Range strategy now uses a lower dynamic score threshold of `65`
+- Breakout and trend strategies now use a dynamic score threshold of `75`
+- Breakout setups receive a `+20` score boost when a valid Asian range exists and the breakout is detected
+- Unstable-trend and trend-structure filters are now softened for stronger setups instead of acting as rigid blockers
+
+### Trade Result Logging
+
+Both EAs now print explicit result lines when trades close:
+
+- M1: `[GoldEA-M1] TRADE_RESULT: WIN/LOSS/BREAKEVEN profit=...`
+- M5: `[GoldEA-M5] TRADE_RESULT: WIN/LOSS/BREAKEVEN profit=...`
+
+This makes MT5 tester logs much easier to analyze later with the Python log parser.
+
+### Log Analyzer Update
+
+The Python analyzer now supports mixed logs from both EAs in the same file set.
+
+It automatically classifies entries into:
+
+- `M1`
+- `M5`
+
+Classification rules include:
+
+- `M1_Scalper`
+- `timeframe=1`
+- `[SCALPER_TREND]`
+- `Adaptive_MultiFactor`
+- `timeframe=5`
+- `[TREND]`
+- `[RANGE]`
+
+The analyzer now produces:
+
+- separate `M1 SUMMARY`
+- separate `M5 SUMMARY`
+- a final `COMPARISON` section
+
+Comparison output includes:
+
+- M1 trade rate vs M5
+- M1 win rate vs M5
+- most common rejection reason for each EA
+- over-filtering / no-trade style insights

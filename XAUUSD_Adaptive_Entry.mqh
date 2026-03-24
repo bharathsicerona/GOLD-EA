@@ -85,12 +85,15 @@ DecisionContext RunRangeStrategy(const ENUM_POSITION_TYPE direction,const Indica
    int maxScore = InpWeightRsi + InpWeightRangeBB;
    ctx.score = maxScore > 0 ? (int)MathRound((double)rawScore * 100.0 / (double)maxScore) : 0;
 
+   int minScore = 65;
    bool structureOk = rsiOk && bbOk;
-   bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= InpMinimumScore);
-   ctx.valid = snapshot.spreadOk && structureOk && scoreOk;
+   bool adaptiveRangeOk = structureOk || (ctx.score >= minScore && (rsiOk || bbOk));
+   bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= minScore);
+   ctx.valid = snapshot.spreadOk && adaptiveRangeOk && scoreOk;
 
    if(!snapshot.spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
-   else if(!structureOk) ctx.reason = "RANGE_STRUCTURE_FAIL";
+   else if(!adaptiveRangeOk && ctx.score < 85) ctx.reason = "RANGE_STRUCTURE_FAIL";
+   else if(!adaptiveRangeOk) ctx.reason = "RANGE_NEAR_MISS";
    else if(!scoreOk) ctx.reason = "SCORE_TOO_LOW";
    else ctx.reason = "SETUP_VALID";
 
@@ -119,6 +122,7 @@ DecisionContext RunBreakoutStrategy(const ENUM_POSITION_TYPE direction,const Ind
    bool trendOk = false;
    bool rsiOk = false;
    bool pullbackOk = false;
+   bool rangeDetected = (g_asianHigh > 0.0 && g_asianLow > 0.0 && g_asianHigh > g_asianLow);
 
    if(direction == POSITION_TYPE_BUY)
      {
@@ -143,6 +147,8 @@ DecisionContext RunBreakoutStrategy(const ENUM_POSITION_TYPE direction,const Ind
    int maxScore = InpWeightTrend + InpWeightEmaAlignment + InpWeightRsi + InpWeightPullback + InpWeightBreakout;
    ctx.score = maxScore > 0 ? (int)MathRound((double)rawScore * 100.0 / (double)maxScore) : 0;
 
+   if(rangeDetected && breakOk)
+      ctx.score += 20;
    if((snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK) && snapshot.adx > 25.0)
       ctx.score += 15;
    if(!breakOk)
@@ -154,17 +160,20 @@ DecisionContext RunBreakoutStrategy(const ENUM_POSITION_TYPE direction,const Ind
    bool emaGapOk = snapshot.emaGapOk;
    bool persistenceOk = (direction == POSITION_TYPE_BUY) ? snapshot.trendPersistentBuy : snapshot.trendPersistentSell;
    bool structureOk = trendOk && rsiOk && pullbackOk;
-   bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= InpMinimumScore);
+    int minScore = 75;
+   bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= minScore);
    bool strongTrendOverride = (ctx.score >= 90);
    bool trendOverride = (!breakOk && trendOk && adxOk && ctx.score >= 80);
+   bool adaptivePersistenceOk = persistenceOk || ctx.score >= 85;
+   bool adaptiveStructureOk = structureOk || ctx.score >= 85;
 
-   ctx.valid = snapshot.spreadOk && adxOk && (emaGapOk || strongTrendOverride) && (persistenceOk || strongTrendOverride) && (structureOk || strongTrendOverride) && scoreOk && (breakOk || trendOverride);
+   ctx.valid = snapshot.spreadOk && adxOk && (emaGapOk || strongTrendOverride) && (adaptivePersistenceOk || strongTrendOverride) && (adaptiveStructureOk || strongTrendOverride) && scoreOk && (breakOk || trendOverride);
 
    if(!snapshot.spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
    else if(!adxOk) ctx.reason = "WEAK_TREND";
    else if(!emaGapOk && !strongTrendOverride) ctx.reason = "SIDEWAYS_MARKET";
-   else if(!persistenceOk && !strongTrendOverride) ctx.reason = "UNSTABLE_TREND";
-   else if(!structureOk && !strongTrendOverride) ctx.reason = "TREND_STRUCTURE_FAIL";
+   else if(!adaptivePersistenceOk && !strongTrendOverride) ctx.reason = "UNSTABLE_TREND";
+   else if(!adaptiveStructureOk && !strongTrendOverride) ctx.reason = "TREND_STRUCTURE_FAIL";
    else if(!breakOk && !trendOverride) ctx.reason = "WEAK_BREAKOUT";
    else if(!scoreOk) ctx.reason = "SCORE_TOO_LOW";
    else ctx.reason = strongTrendOverride ? "SETUP_VALID_OVERRIDE" : "SETUP_VALID";
@@ -223,16 +232,19 @@ DecisionContext RunTrendStrategy(const ENUM_POSITION_TYPE direction,const Indica
    bool emaGapOk = snapshot.emaGapOk;
    bool persistenceOk = (direction == POSITION_TYPE_BUY) ? snapshot.trendPersistentBuy : snapshot.trendPersistentSell;
    bool structureOk = trendOk && rsiOk && pullbackOk;
-   bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= InpMinimumScore);
+   int minScore = 75;
+   bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= minScore);
    bool strongTrendOverride = (ctx.score >= 90);
+   bool adaptivePersistenceOk = persistenceOk || ctx.score >= 85;
+   bool adaptiveStructureOk = structureOk || ctx.score >= 85;
 
-   ctx.valid = snapshot.spreadOk && adxOk && (emaGapOk || strongTrendOverride) && (persistenceOk || strongTrendOverride) && (structureOk || strongTrendOverride) && scoreOk;
+   ctx.valid = snapshot.spreadOk && adxOk && (emaGapOk || strongTrendOverride) && (adaptivePersistenceOk || strongTrendOverride) && (adaptiveStructureOk || strongTrendOverride) && scoreOk;
 
    if(!snapshot.spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
    else if(!adxOk) ctx.reason = "WEAK_TREND";
    else if(!emaGapOk && !strongTrendOverride) ctx.reason = "SIDEWAYS_MARKET";
-   else if(!persistenceOk && !strongTrendOverride) ctx.reason = "UNSTABLE_TREND";
-   else if(!structureOk && !strongTrendOverride) ctx.reason = "TREND_STRUCTURE_FAIL";
+   else if(!adaptivePersistenceOk && !strongTrendOverride) ctx.reason = "UNSTABLE_TREND";
+   else if(!adaptiveStructureOk && !strongTrendOverride) ctx.reason = "TREND_STRUCTURE_FAIL";
    else if(!scoreOk) ctx.reason = "SCORE_TOO_LOW";
    else ctx.reason = strongTrendOverride ? "SETUP_VALID_OVERRIDE" : "SETUP_VALID";
 

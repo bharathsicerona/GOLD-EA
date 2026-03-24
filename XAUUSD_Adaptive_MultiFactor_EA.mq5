@@ -11,9 +11,8 @@ datetime g_lastBuyBar       = 0;
 datetime g_lastSellBar      = 0;
 datetime g_lastTradeTime    = 0;
 
-void DebugPrint(const string message);
-
 #include "XAUUSD_Adaptive_Inputs.mqh"
+#include "GoldEA_Common_Core.mqh"
 #include "XAUUSD_Adaptive_Indicators.mqh"
 #include "XAUUSD_Adaptive_Entry.mqh"
 #include "XAUUSD_Adaptive_Risk.mqh"

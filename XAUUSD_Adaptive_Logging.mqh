@@ -3,43 +3,9 @@
 
 string g_dashboardPrefix  = "GoldEA_Dash_";
 
-void DebugPrint(const string message)
-  {
-   if(InpEnableDebugPrints)
-      Print("[GoldEA] ",message);
-  }
-
-string CurrentTimeText()
-  {
-   return TimeToString(TimeTradeServer(),TIME_DATE | TIME_SECONDS);
-  }
-
 void CleanupOldLogs()
   {
-   if(InpLogRetentionDays <= 0)
-      return;
-
-   string fileName;
-   long searchHandle = FileFindFirst("GoldEA_Log_*.csv", fileName);
-   if(searchHandle != INVALID_HANDLE)
-     {
-      datetime threshold = TimeTradeServer() - (InpLogRetentionDays * 86400);
-      do
-        {
-         if(StringLen(fileName) < 20)
-            continue;
-         string dateToken = StringSubstr(fileName,11,8);
-         string formattedDate = StringFormat("%s.%s.%s",StringSubstr(dateToken,0,4),StringSubstr(dateToken,4,2),StringSubstr(dateToken,6,2));
-         datetime fileDate = StringToTime(formattedDate);
-         if(fileDate > 0 && fileDate < threshold)
-           {
-            FileDelete(fileName);
-            DebugPrint(StringFormat("Deleted old log file: %s", fileName));
-           }
-        }
-      while(FileFindNext(searchHandle, fileName));
-      FileFindClose(searchHandle);
-     }
+   CleanupLogsByPattern("GoldEA_Log_*.csv",20,11);
   }
 
 void LogToCSV(const string action,
@@ -83,18 +49,7 @@ void LogToCSV(const string action,
 
 void SetDashboardLine(const string name,const string text,const color textColor,const int row)
   {
-   string objectName = g_dashboardPrefix + name;
-   if(ObjectFind(0,objectName) < 0)
-     {
-      ObjectCreate(0,objectName,OBJ_LABEL,0,0,0);
-      ObjectSetInteger(0,objectName,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-      ObjectSetInteger(0,objectName,OBJPROP_XDISTANCE,10);
-      ObjectSetInteger(0,objectName,OBJPROP_YDISTANCE,20 + row * 18);
-      ObjectSetInteger(0,objectName,OBJPROP_FONTSIZE,10);
-      ObjectSetString(0,objectName,OBJPROP_FONT,"Consolas");
-     }
-   ObjectSetString(0,objectName,OBJPROP_TEXT,text);
-   ObjectSetInteger(0,objectName,OBJPROP_COLOR,textColor);
+   SetDashboardLabelLine(g_dashboardPrefix,name,text,textColor,row);
   }
 
 void UpdateDashboard(const DecisionContext &context)

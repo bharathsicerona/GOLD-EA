@@ -52,17 +52,6 @@ struct IndicatorSnapshot
    bool   pullbackSellOk;
   };
 
-bool GetIndicatorValue(const int handle,const int shift,double &value,const int bufferIndex = 0)
-  {
-   double buffer[];
-   ArraySetAsSeries(buffer,true);
-   if(CopyBuffer(handle,bufferIndex,shift,1,buffer) != 1)
-      return false;
-
-   value = buffer[0];
-   return true;
-  }
-
 bool GetRates(MqlRates &rates[],const int count)
   {
    ArraySetAsSeries(rates,true);

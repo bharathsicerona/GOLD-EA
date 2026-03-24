@@ -16,28 +16,6 @@ double NormalizeStopDistance(const double requestedDistance)
    return MathMax(requestedDistance, GetMinimumStopDistance());
   }
 
-double NormalizeVolume(const double volume)
-  {
-   double minLot  = SymbolInfoDouble(InpTradeSymbol, SYMBOL_VOLUME_MIN);
-   double maxLot  = SymbolInfoDouble(InpTradeSymbol, SYMBOL_VOLUME_MAX);
-   double lotStep = SymbolInfoDouble(InpTradeSymbol, SYMBOL_VOLUME_STEP);
-
-   if(minLot <= 0.0) minLot = 0.01;
-   if(maxLot <= 0.0) maxLot = 100.0;
-   if(lotStep <= 0.0) lotStep = 0.01;
-
-   double normalized = MathFloor(volume / lotStep) * lotStep;
-   if(normalized < minLot) normalized = minLot;
-   if(normalized > maxLot) normalized = maxLot;
-   
-   int digits = 2;
-   if(lotStep == 0.001) digits = 3;
-   if(lotStep == 0.1) digits = 1;
-   if(lotStep == 1.0) digits = 0;
-   
-   return NormalizeDouble(normalized, digits);
-  }
-
 double CalculateDynamicLotSize(const double stopDistance)
   {
    double normalizedStop = NormalizeStopDistance(stopDistance);
