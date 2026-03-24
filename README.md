@@ -140,6 +140,12 @@ This helps reduce weaker setups.
 ## 7. Project Files
 
 - [XAUUSD_Adaptive_MultiFactor_EA.mq5](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_MultiFactor_EA.mq5)
+- [XAUUSD_Adaptive_Inputs.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_Inputs.mqh)
+- [XAUUSD_Adaptive_Indicators.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_Indicators.mqh)
+- [XAUUSD_Adaptive_Entry.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_Entry.mqh)
+- [XAUUSD_Adaptive_Risk.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_Risk.mqh)
+- [XAUUSD_Adaptive_Logging.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_Logging.mqh)
+- [XAUUSD_Adaptive_Management.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_Adaptive_Management.mqh)
 - [XAUUSD_M1_Scalper_EA.mq5](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_EA.mq5)
 - [XAUUSD_M1_Scalper_README.md](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_README.md)
 - [XAUUSD_M1_Scalper_Inputs.mqh](C:\Users\bhara\OneDrive\Documents\Auto-trading code\XAUUSD_M1_Scalper_Inputs.mqh)
@@ -158,6 +164,7 @@ This helps reduce weaker setups.
 Use the file that matches your stage:
 
 - Use `XAUUSD_Adaptive_MultiFactor_EA.mq5` if you want the full strategy with scoring and advanced trade management
+- Keep the M5 `.mqh` support files beside `XAUUSD_Adaptive_MultiFactor_EA.mq5` when compiling the split M5 EA
 - Use `XAUUSD_M1_Scalper_EA.mq5` if you want the dedicated M1 momentum scalper
 - Use `XAUUSD_Beginner_Trend_Pullback_EA.mq5` if you want the simpler M5 learning version
 - Use `XAUUSD_Exness_Starter_Preset.txt` as a starting input guide for Exness
