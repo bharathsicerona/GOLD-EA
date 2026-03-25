@@ -1,9 +1,21 @@
-# Ignore compiled MetaTrader 5 executables
+# MetaTrader / MQL5
 *.ex5
+*.mq5.log
+*.log
+*.set
+*.tpl
+/Files/
+/Tester/
+/logs/
 
-# Ignore generated logs and test outputs
-logs/
-backlog_test*.txt
+# IDE specific
+.vscode/
+*.db
+*.orig
 
-# Ignore MT5 specific IDE files
-*.mqproj
+# Gemini CLI specific
+.qodo/
+
+# OS specific
+.DS_Store
+Thumbs.db

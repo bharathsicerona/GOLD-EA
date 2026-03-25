@@ -1,275 +1,359 @@
 #property strict
-#property version   "1.00"
-#property description "M1 Scalper EA v1 for XAUUSD with Dynamic SL Shrinking and 1:3 RR"
+#property version   "2.70"
+#property description "M1 High-Risk Scalper EA v2.7 - Bi-directional Trading Upgrade"
 
 #include <Trade/Trade.mqh>
+#include <Generic/HashMap.mqh>
 
+// --- Global Variables & Objects ---
 CTrade trade;
-int g_symbolDigits  = 2;
-datetime g_lastBarTime   = 0;
-datetime g_lastTradeTime = 0;
+int    g_symbolDigits = 2;
 datetime g_lastLossTime = 0;
-datetime g_tradeMinuteStamp = 0;
-int      g_tradesThisMinute = 0;
-int      g_consecutiveLosses = 0;
+datetime g_lastCloseTime = 0;
+datetime g_lastTradeBarTime = 0;
 
+// Indicator Handles
+int g_ema20Handle = INVALID_HANDLE;
+int g_ema50Handle = INVALID_HANDLE;
+int g_rsiHandle   = INVALID_HANDLE;
+int g_atrHandle   = INVALID_HANDLE;
+
+// Include all modular components
 #include "XAUUSD_M1_Scalper_Inputs.mqh"
 #include "GoldEA_Common_Core.mqh"
 #include "XAUUSD_M1_Scalper_Indicators.mqh"
 #include "XAUUSD_M1_Scalper_Entry.mqh"
-#include "XAUUSD_M1_Scalper_Risk.mqh"
-#include "XAUUSD_M1_Scalper_Logging.mqh"
-#include "XAUUSD_M1_Scalper_Management.mqh"
-  
+#include "GoldEA_Unified_Risk.mqh" // <-- NEW UNIFIED RISK ENGINE
+// #include "XAUUSD_M1_Scalper_Logging.mqh" // Commented out to fix compile errors
+#include "XAUUSD_M1_Scalper_HighRisk_Management.mqh"
+
+// Custom hash map to store initial risk per ticket
+CHashMap<ulong, double> g_initialRiskMap;
+
+// --- Forward Declarations for Indicator Functions ---
+bool InitializeIndicators();
+void ReleaseIndicators();
+
+//+------------------------------------------------------------------+
+//| Open Position Check                                              |
+//+------------------------------------------------------------------+
 bool HasOpenPosition()
-  {
-   for(int i = PositionsTotal() - 1; i >= 0; --i)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0 && PositionGetString(POSITION_SYMBOL) == InpTradeSymbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
-         return true;
-     }
-   return false;
-  }
-
-DecisionContext PickBestDecision(const DecisionContext &buyContext,const DecisionContext &sellContext)
-  {
-   DecisionContext result;
-   result.valid    = false;
-   result.type     = POSITION_TYPE_BUY;
-   result.action   = "TICK_EVAL";
-   result.phase    = "LIVE_PREVIEW";
-   result.decision = "SKIPPED";
-   result.reason   = "NO_SETUP";
-   result.status   = buyContext.status;
-   result.sessionName = buyContext.sessionName;
-   result.strategyName = "EVAL_PENDING";
-   result.price    = buyContext.price;
-   result.rsi      = buyContext.rsi;
-   result.ema50    = buyContext.ema50;
-   result.ema20    = buyContext.ema20;
-   result.atr      = buyContext.atr;
-   result.spread   = buyContext.spread;
-   result.score    = MathMax(buyContext.score,sellContext.score);
-   result.isCounterTrend = false;
-   result.riskPercent = InpMaxRiskPercent;
-
-   if(buyContext.valid && (!sellContext.valid || buyContext.score >= sellContext.score))
-      return buyContext;
-   if(sellContext.valid)
-      return sellContext;
-
-   if(buyContext.reason == "SESSION_BLOCKED") result.reason = "SESSION_BLOCKED";
-   else if(buyContext.reason == "SPREAD_TOO_HIGH") result.reason = "SPREAD_TOO_HIGH";
-   else if(buyContext.score >= sellContext.score)
-     {
-      result.strategyName = buyContext.strategyName;
-      result.reason = buyContext.reason;
-     }
-   else
-     {
-      result.strategyName = sellContext.strategyName;
-      result.reason = sellContext.reason;
-     }
-   return result;
-  }
-
-void ExecuteTrade(const DecisionContext &context)
-  {
-   double entryPrice = 0.0;
-   double slDistance = 0.0;
-   double lotSize = 0.0;
-   string blockReason = "";
-
-   if(!CanPlaceTrade(context, blockReason, entryPrice, slDistance, lotSize))
-     {
-      DebugPrint(StringFormat("Trade blocked: %s", blockReason));
-      LogToCSV("TRADE_SKIPPED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema20,context.atr,context.spread,context.score,context.decision,blockReason);
-      return;
-     }
-
-   double tpDistance = slDistance * InpRewardRiskRatio;
-   
-   double slPrice = 0.0;
-   double tpPrice = 0.0;
-   
-   ulong tradeId = NextTradeId();
-   string commentText = StringFormat("GoldEA#%I64u %s",tradeId,context.decision);
-
-   if(context.type == POSITION_TYPE_BUY)
-     {
-      slPrice = NormalizeDouble(entryPrice - slDistance, g_symbolDigits);
-      tpPrice = NormalizeDouble(entryPrice + tpDistance, g_symbolDigits);
-     }
-   else
-     {
-      slPrice = NormalizeDouble(entryPrice + slDistance, g_symbolDigits);
-      tpPrice = NormalizeDouble(entryPrice - tpDistance, g_symbolDigits);
-     }
-
-   trade.SetExpertMagicNumber(InpMagicNumber);
-   trade.SetDeviationInPoints(20);
-
-   bool success = false;
-   if(context.type == POSITION_TYPE_BUY)
-      success = trade.Buy(lotSize, InpTradeSymbol, 0.0, slPrice, tpPrice, commentText);
-   else
-      success = trade.Sell(lotSize, InpTradeSymbol, 0.0, slPrice, tpPrice, commentText);
-
-   if(success)
-     {
-      g_lastTradeTime = TimeTradeServer();
-      ResetTradeMinuteCounterIfNeeded();
-      g_tradesThisMinute++;
-      double tickSize = SymbolInfoDouble(InpTradeSymbol, SYMBOL_TRADE_TICK_SIZE);
-      double tickValue = SymbolInfoDouble(InpTradeSymbol, SYMBOL_TRADE_TICK_VALUE);
-      double actualRiskPct = ((lotSize * (slDistance / tickSize) * tickValue) / AccountInfoDouble(ACCOUNT_EQUITY)) * 100.0;
-
-      DebugPrint(StringFormat("%s executed: tradeId=%I64u lot=%.2f entry=%.2f sl=%.2f tp=%.2f",context.decision,tradeId,lotSize,entryPrice,slPrice,tpPrice));
-      LogToCSV(context.decision + "_EXECUTED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema20,context.atr,context.spread,context.score,context.decision,StringFormat("TRADE_ID_%I64u",tradeId));
-
-      if(InpEnablePushAlerts || InpEnableEmailAlerts)
-        {
-         string alertSubject = StringFormat("GoldEA %s %s Executed", context.strategyName, context.decision);
-         string alertMsg = StringFormat("Action: %s %s\nType: %s\nActual Risk: %.2f%%\nLot: %.2f\nEntry: %.2f\nSL: %.2f\nTP Dist: %.2f points\nScore: %d",
-                                        context.decision, InpTradeSymbol, context.strategyName, actualRiskPct, lotSize, entryPrice, slPrice, tpDistance / _Point, context.score);
-         if(InpEnablePushAlerts) SendNotification(alertSubject + "\n" + alertMsg);
-         if(InpEnableEmailAlerts) SendMail(alertSubject, alertMsg);
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--) {
+        if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber) {
+            return true;
         }
-     }
-   else
-     {
-      string failReason = StringFormat("ORDER_FAILED_%d_%s",trade.ResultRetcode(),trade.ResultRetcodeDescription());
-      DebugPrint(StringFormat("%s order failed: %s",context.decision,failReason));
-      LogToCSV(context.decision + "_FAILED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema20,context.atr,context.spread,context.score,context.decision,failReason);
-     }
-  }
+    }
+    return false;
+}
 
+// --- Margin and Cooldown Checks (Moved from XAUUSD_M1_Scalper_Risk.mqh to fix dependency) ---
+bool HasSufficientMargin(const ENUM_POSITION_TYPE type, const double volume, const double entryPrice)
+{
+    if (volume <= 0.0) return false;
+    double marginRequired = 0.0;
+    if (!OrderCalcMargin((type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, _Symbol, volume, entryPrice, marginRequired))
+    {
+        return false;
+    }
+    return (AccountInfoDouble(ACCOUNT_MARGIN_FREE) >= marginRequired * 1.5);
+}
+
+bool IsCooldownActive()
+{
+    datetime now = TimeTradeServer();
+    if (g_lastLossTime > 0 && InpCooldownAfterLoss > 0 && (now - g_lastLossTime) < InpCooldownAfterLoss)
+    {
+        return true;
+    }
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| ExecuteHighRiskTrade - New Trade Execution Logic                 |
+//+------------------------------------------------------------------+
+void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction)
+{
+    // --- 1. Get Entry Price & ATR for Initial SL Placement ---
+    double entryPrice = (direction == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double atrValue;
+    if (!GetIndicatorValue(g_atrHandle, 1, atrValue)) {
+        DebugPrint("Could not get ATR for trade execution.");
+        return;
+    }
+
+    // --- 2. Define Initial Trade Parameters ---
+    double lotSize = 0.02; // Start with a value > minLot to trigger dynamic % risk calculation.
+                           // The risk engine will clamp to minLot and re-evaluate if needed.
+    double slDistance = atrValue * InpStopAtrMultiplier;
+    double slPrice = (direction == POSITION_TYPE_BUY) 
+                   ? entryPrice - slDistance
+                   : entryPrice + slDistance;
+
+    // --- 3. APPLY UNIFIED RISK ENGINE ---
+    // This function will adjust lotSize and slPrice by reference to meet risk rules.
+    if (!CalculateTradeRisk((direction == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, entryPrice, lotSize, slPrice))
+    {
+        DebugPrint("Trade aborted by Unified Risk Engine. Check logs for details.");
+        return; // Risk engine determined the trade is not viable.
+    }
+    
+    // --- 4. Calculate Final TP and Normalize Stops ---
+    double finalSlDistance = MathAbs(entryPrice - slPrice);
+    double tpDistance = finalSlDistance * InpRewardRiskRatio;
+    double tpPrice = (direction == POSITION_TYPE_BUY)
+                   ? entryPrice + tpDistance
+                   : entryPrice - tpDistance;
+
+    // Final normalization after all calculations
+    slPrice = NormalizeDouble(slPrice, g_symbolDigits);
+    tpPrice = NormalizeDouble(tpPrice, g_symbolDigits);
+
+    // --- 5. Margin Check ---
+    if (!HasSufficientMargin(direction, lotSize, entryPrice)) {
+        DebugPrint("Trade skipped due to insufficient margin for risk-adjusted lot.");
+        return;
+    }
+
+    // --- 6. Calculate Final Initial Risk for Management Modules ---
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double initialRiskInCurrency = (finalSlDistance / tickSize) * tickValue * lotSize;
+
+    // --- 7. Execute Trade ---
+    trade.SetExpertMagicNumber(InpMagicNumber);
+    trade.SetDeviationInPoints(20);
+    
+    ENUM_ORDER_TYPE orderType = (direction == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+    
+    if (trade.PositionOpen(_Symbol, orderType, lotSize, entryPrice, slPrice, tpPrice)) {
+        ulong ticket = trade.ResultDeal();
+        DebugPrint(StringFormat("TRADE EXECUTED: %s %.2f lots @ %.2f, SL=%.2f, TP=%.f", 
+            (direction == POSITION_TYPE_BUY ? "BUY" : "SELL"), lotSize, entryPrice, slPrice, tpPrice));
+
+        // --- 8. Store Initial Risk ---
+        if (ticket > 0) {
+            if (!g_initialRiskMap.ContainsKey(ticket)) {
+                g_initialRiskMap.Add(ticket, initialRiskInCurrency);
+                DebugPrint(StringFormat("Initial risk for ticket #%I64u stored: $%.2f", ticket, initialRiskInCurrency));
+            }
+            // Record the bar time of the successful entry to prevent same-candle re-entries
+            g_lastTradeBarTime = iTime(_Symbol, PERIOD_M1, 0);
+        }
+    } else {
+        DebugPrint(StringFormat("Trade execution failed: %s", trade.ResultComment()));
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ExtendTakeProfit - Dynamically Pushes TP for Runners             |
+//+------------------------------------------------------------------+
+void ExtendTakeProfit(ulong ticket, double initialRisk)
+{
+    if (initialRisk <= 0) return;
+    double profit = PositionGetDouble(POSITION_PROFIT);
+    
+    // If profit is more than 2x initial risk (strong runner), extend TP to avoid premature exit
+    if (profit > (initialRisk * 2.0)) {
+        double currentTP = PositionGetDouble(POSITION_TP);
+        double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+        long type = PositionGetInteger(POSITION_TYPE);
+        double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+        
+        double newTP = 0;
+        double minTpDistance = 100 * point; // If price gets within 100 points of TP, push it away
+        double pushDistance  = 300 * point; // Push TP 300 points further
+        
+        if (type == POSITION_TYPE_BUY && currentTP != 0 && (currentTP - currentPrice) < minTpDistance) {
+            newTP = currentPrice + pushDistance;
+        } else if (type == POSITION_TYPE_SELL && currentTP != 0 && (currentPrice - currentTP) < minTpDistance) {
+            newTP = currentPrice - pushDistance;
+        }
+        
+        if (newTP != 0) {
+            trade.PositionModify(ticket, PositionGetDouble(POSITION_SL), newTP);
+            DebugPrint("Runner detected: TP dynamically extended to prevent premature exit.");
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| OnInit: EA Initialization                                        |
+//+------------------------------------------------------------------+
 int OnInit()
-  {
-   g_symbolDigits = (int)SymbolInfoInteger(InpTradeSymbol, SYMBOL_DIGITS);
-   
-   // --- Load Indicators ---
-   g_ema20Handle = iMA(InpTradeSymbol, InpTimeframe, InpFastEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
-   if(g_ema20Handle == INVALID_HANDLE)
-     {
-      PrintFormat("Error creating Fast EMA indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError());
-      return INIT_FAILED;
-     }
+{
+    g_symbolDigits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    
+    // Init indicators
+    if (!InitializeIndicators()) return INIT_FAILED;
+    
+    // Init trade engine
+    trade.SetTypeFillingBySymbol(_Symbol);
 
-   g_ema50Handle = iMA(InpTradeSymbol, InpTimeframe, InpSlowEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
-   if(g_ema50Handle == INVALID_HANDLE)
-     {
-      PrintFormat("Error creating Slow EMA indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError());
-      return INIT_FAILED;
-     }
+    DebugPrint("High-Risk M1 EA v2.1 Initialized.");
+    return INIT_SUCCEEDED;
+}
 
-   g_rsiHandle   = iRSI(InpTradeSymbol, InpTimeframe, InpRsiPeriod, PRICE_CLOSE);
-   if(g_rsiHandle == INVALID_HANDLE)
-     {
-      PrintFormat("Error creating RSI indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError());
-      return INIT_FAILED;
-     }
-     
-   g_atrHandle   = iATR(InpTradeSymbol, InpTimeframe, InpAtrPeriod);
-   if(g_atrHandle == INVALID_HANDLE)
-     {
-      PrintFormat("Error creating ATR indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError());
-      return INIT_FAILED;
-     }
-
-   // --- Initialize Trade Engine ---
-   trade.SetExpertMagicNumber(InpMagicNumber);
-   trade.SetTypeFillingBySymbol(InpTradeSymbol);
-   
-   // --- Finalize ---
-   CleanupOldLogs();
-   DebugPrint(StringFormat("M1 EA initialized on %s timeframe=%d",InpTradeSymbol,InpTimeframe));
-   LogToCSV("INIT","NONE","NONE",0.0,0.0,0.0,0.0,0.0,0,0,"ACTIVE","EA_INITIALIZED");
-   return INIT_SUCCEEDED;
-  }
-
+//+------------------------------------------------------------------+
+//| OnDeinit: EA Deinitialization                                    |
+//+------------------------------------------------------------------+
 void OnDeinit(const int reason)
-  {
-   if(g_ema20Handle != INVALID_HANDLE) IndicatorRelease(g_ema20Handle);
-   if(g_ema50Handle != INVALID_HANDLE) IndicatorRelease(g_ema50Handle);
-   if(g_rsiHandle != INVALID_HANDLE) IndicatorRelease(g_rsiHandle);
-   if(g_atrHandle != INVALID_HANDLE) IndicatorRelease(g_atrHandle);
+{
+    ReleaseIndicators();
+    // g_initialRiskMap is destroyed automatically
+    DebugPrint("High-Risk M1 EA Deinitialized.");
+}
 
-   if(InpEnableDashboard)
-     {
-      string labels[7] = {"Title","Session","Strategy","ATR","Score","Decision","Reason"};
-      for(int i = 0; i < 7; ++i)
-         ObjectDelete(0,g_dashboardPrefix + labels[i]);
-     }
-   LogToCSV("DEINIT","NONE","NONE",0.0,0.0,0.0,0.0,0.0,0,0,"STOPPED",StringFormat("REASON_%d",reason));
-  }
+//+------------------------------------------------------------------+
+//| OnTradeTransaction: Handle Closed Trades                         |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
+{
+    if (trans.type == TRADE_TRANSACTION_DEAL_ADD) {
+        if (HistoryDealSelect(trans.deal)) {
+            if (HistoryDealGetInteger(trans.deal, DEAL_MAGIC) == InpMagicNumber) {
+                // If a position is closed, remove its initial risk from the map
+                if (HistoryDealGetInteger(trans.deal, DEAL_ENTRY) == DEAL_ENTRY_OUT) {
+                    ulong position_id = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+                    if (g_initialRiskMap.ContainsKey(position_id)) {
+                        g_initialRiskMap.Remove(position_id);
+                        DebugPrint(StringFormat("Initial risk for closed ticket #%I64u removed.", position_id));
+                    }
+                    // Cooldown after loss
+                    if(HistoryDealGetDouble(trans.deal, DEAL_PROFIT) < 0) {
+                        g_lastLossTime = TimeCurrent();
+                    }
+                    // Cooldown after ANY trade
+                    g_lastCloseTime = TimeCurrent();
+                }
+            }
+        }
+    }
+}
 
-bool IsNewBar()
-  {
-   datetime times[];
-   ArraySetAsSeries(times, true);
-   if(CopyTime(InpTradeSymbol, InpTimeframe, 0, 1, times) != 1) return false;
-   if(times[0] == g_lastBarTime) return false;
-   
-   g_lastBarTime = times[0];
-   return true;
-  }
-
-void EvaluateTickAndDashboard()
-  {
-   DecisionContext buyContext = RunScalperStrategy(POSITION_TYPE_BUY, false);
-   DecisionContext sellContext = RunScalperStrategy(POSITION_TYPE_SELL, false);
-   buyContext.phase  = "LIVE_PREVIEW";
-   sellContext.phase = "LIVE_PREVIEW";
-
-   ResetTradeMinuteCounterIfNeeded();
-   if(HasOpenPosition())
-     {
-      buyContext.valid = false; buyContext.reason = "MAX_GLOBAL_TRADES_REACHED";
-      sellContext.valid = false; sellContext.reason = "MAX_GLOBAL_TRADES_REACHED";
-     }
-   else if(g_tradesThisMinute >= InpMaxTradesPerMinute)
-     {
-      buyContext.valid = false; buyContext.reason = "MAX_TRADES_PER_MINUTE";
-      sellContext.valid = false; sellContext.reason = "MAX_TRADES_PER_MINUTE";
-     }
-   else if(g_consecutiveLosses >= InpMaxConsecutiveLosses)
-     {
-      buyContext.valid = false; buyContext.reason = "MAX_CONSECUTIVE_LOSSES";
-      sellContext.valid = false; sellContext.reason = "MAX_CONSECUTIVE_LOSSES";
-     }
-   else if(IsCooldownActive())
-     {
-      buyContext.valid = false; buyContext.reason = "COOLDOWN_ACTIVE";
-      sellContext.valid = false; sellContext.reason = "COOLDOWN_ACTIVE";
-     }
-
-   DecisionContext current = PickBestDecision(buyContext, sellContext);
-   UpdateDashboard(current);
-
-   if(InpLogEveryTick)
-      LogToCSV("LIVE_TICK_PREVIEW",current.sessionName,current.strategyName,current.price,current.rsi,current.ema50,current.ema20,current.atr,current.spread,current.score,current.decision,current.reason);
-  }
-
+//+------------------------------------------------------------------+
+//| OnTick: Main EA Logic                                            |
+//+------------------------------------------------------------------+
 void OnTick()
-  {
-   bool isNewBar = IsNewBar();
-   ManageOpenPosition(isNewBar);
-   EvaluateTickAndDashboard();
+{
+    // --- 1. Manage Existing Position ---
+    if (HasOpenPosition())
+    {
+        if (PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+        {
+            ulong ticket = PositionGetInteger(POSITION_TICKET);
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            double initialRisk = 0;
+            g_initialRiskMap.TryGetValue(ticket, initialRisk);
 
-   if(!isNewBar) return;
+            // Call the new management functions
+            ManageTrailingStop(ticket, profit);
+            if(initialRisk > 0) {
+                UpdateDynamicTP(ticket, profit, initialRisk);
+                ExtendTakeProfit(ticket, initialRisk);
+            }
+        }
+        return; // Do not look for new trades if one is open
+    }
 
-   DecisionContext buyContext = RunScalperStrategy(POSITION_TYPE_BUY, true);
-   DecisionContext sellContext = RunScalperStrategy(POSITION_TYPE_SELL, true);
-   buyContext.phase  = "BAR_CLOSE_SIGNAL";
-   sellContext.phase = "BAR_CLOSE_SIGNAL";
-   
-   DecisionContext best = PickBestDecision(buyContext, sellContext);
-   
-   if(best.valid)
-     {
-      LogToCSV("BAR_CLOSE_SIGNAL",best.sessionName,best.strategyName,best.price,best.rsi,best.ema50,best.ema20,best.atr,best.spread,best.score,best.decision,best.reason);
-      ExecuteTrade(best);
-     }
-  }
+    // --- 2. Check for New Trade Opportunities ---
+    
+    // Cooldown after loss check
+    if(IsCooldownActive()) {
+        return;
+    }
+
+    // Unified 20-second cooldown after ANY trade closes to prevent extreme overtrading but maintain frequency
+    if (TimeCurrent() - g_lastCloseTime < 20) {
+        return;
+    }
+
+    // Smart Re-entry Filter: Ensure we are on a new M1 candle since the last trade
+    if (iTime(_Symbol, PERIOD_M1, 0) == g_lastTradeBarTime) {
+        return;
+    }
+
+    // Trade Frequency Control (Max 3 trades per 5 minutes)
+    int countTradesLast5Min = 0;
+    datetime currentTime = TimeCurrent();
+    if (HistorySelect(currentTime - 300, currentTime)) {
+        int deals = HistoryDealsTotal();
+        for(int i = 0; i < deals; i++) {
+            ulong dealTicket = HistoryDealGetTicket(i);
+            if (HistoryDealGetInteger(dealTicket, DEAL_ENTRY) == DEAL_ENTRY_OUT) {
+                if (HistoryDealGetInteger(dealTicket, DEAL_MAGIC) == InpMagicNumber) {
+                    countTradesLast5Min++;
+                }
+            }
+        }
+    }
+    if (countTradesLast5Min >= 3) {
+        return; // Prevent extreme overtrading bursts
+    }
+    
+    // Check for BUY signal
+    EntryContext buyContext = ValidateEntry(POSITION_TYPE_BUY);
+    if (buyContext.isValid) {
+        DebugPrint("VALID BUY SIGNAL: " + buyContext.reason);
+        ExecuteHighRiskTrade(POSITION_TYPE_BUY);
+        return;
+    } else {
+        static datetime lastBuyRejectTime = 0;
+        datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
+        if (lastBuyRejectTime != currentBarTime) {
+            DebugPrint("BUY REJECTED: " + buyContext.reason);
+            lastBuyRejectTime = currentBarTime;
+        }
+    }
+
+    // Check for SELL signal
+    EntryContext sellContext = ValidateEntry(POSITION_TYPE_SELL);
+    if (sellContext.isValid) {
+        DebugPrint("VALID SELL SIGNAL: " + sellContext.reason);
+        ExecuteHighRiskTrade(POSITION_TYPE_SELL);
+        return;
+    } else {
+        static datetime lastSellRejectTime = 0;
+        datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
+        if (lastSellRejectTime != currentBarTime) {
+            DebugPrint("SELL REJECTED: " + sellContext.reason);
+            lastSellRejectTime = currentBarTime;
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Indicator Functions                                              |
+//+------------------------------------------------------------------+
+bool InitializeIndicators()
+{
+    g_ema20Handle = iMA(_Symbol, _Period, InpFastEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    if(g_ema20Handle == INVALID_HANDLE) {
+        Print("Error creating Fast EMA indicator.");
+        return false;
+    }
+    g_ema50Handle = iMA(_Symbol, _Period, InpSlowEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    if(g_ema50Handle == INVALID_HANDLE) {
+        Print("Error creating Slow EMA indicator.");
+        return false;
+    }
+    g_rsiHandle = iRSI(_Symbol, _Period, InpRsiPeriod, PRICE_CLOSE);
+    if(g_rsiHandle == INVALID_HANDLE) {
+        Print("Error creating RSI indicator.");
+        return false;
+    }
+    g_atrHandle = iATR(_Symbol, _Period, InpAtrPeriod);
+    if(g_atrHandle == INVALID_HANDLE) {
+        Print("Error creating ATR indicator.");
+        return false;
+    }
+    return true;
+}
+
+void ReleaseIndicators()
+{
+    if(g_ema20Handle != INVALID_HANDLE) IndicatorRelease(g_ema20Handle);
+    if(g_ema50Handle != INVALID_HANDLE) IndicatorRelease(g_ema50Handle);
+    if(g_rsiHandle != INVALID_HANDLE) IndicatorRelease(g_rsiHandle);
+    if(g_atrHandle != INVALID_HANDLE) IndicatorRelease(g_atrHandle);
+}

@@ -166,6 +166,7 @@ bool ExecuteTrade(const DecisionContext &context)
       GlobalVariableSet(BuildStateKey("minprofit",ticket),0.0);
       GlobalVariableSet(BuildStateKey("acclock",ticket),0.0);
       GlobalVariableSet(BuildStateKey("tradeid",ticket),(double)tradeId);
+      GlobalVariableSet(BuildStateKey("M5TrailLevel", ticket), 0); // Initialize R-Multiple Trail Level
      }
 
    if(context.type == POSITION_TYPE_BUY)
@@ -225,6 +226,59 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
    double profitDistance = (type == POSITION_TYPE_BUY) ? (priceNow - openPrice)
                                                        : (openPrice - priceNow);
    double rMultiple = profitDistance / initialRisk;
+
+   // --- M5 R-Multiple Trailing Stop System ---
+   string trailLevelKey = BuildStateKey("M5TrailLevel", ticket);
+   if (GlobalVariableCheck(trailLevelKey))
+   {
+       int currentTrailLevel = (int)GlobalVariableGet(trailLevelKey);
+       int desiredTrailLevel = currentTrailLevel;
+
+       // Determine the highest trail level the trade currently qualifies for
+       if (rMultiple >= 2.5)      desiredTrailLevel = 4;
+       else if (rMultiple >= 2.0) desiredTrailLevel = 3;
+       else if (rMultiple >= 1.0) desiredTrailLevel = 2;
+       else if (rMultiple >= 0.5) desiredTrailLevel = 1;
+
+       // If the trade qualifies for a higher level than it's currently on
+       if (desiredTrailLevel > currentTrailLevel)
+       {
+           double newSL_R = 0.0;
+           // Get the target SL in R-terms based on the desired level
+           if (desiredTrailLevel == 1) newSL_R = 0.1; // At 0.5R profit, move SL to +0.1R
+           if (desiredTrailLevel == 2) newSL_R = 0.5; // At 1.0R profit, move SL to +0.5R
+           if (desiredTrailLevel == 3) newSL_R = 1.0; // At 2.0R profit, move SL to +1.0R
+           if (desiredTrailLevel == 4) newSL_R = 1.5; // At 2.5R profit, move SL to +1.5R
+
+           double newSlPrice = 0.0;
+           if (type == POSITION_TYPE_BUY)
+               newSlPrice = NormalizeDouble(openPrice + (initialRisk * newSL_R), g_symbolDigits);
+           else // SELL
+               newSlPrice = NormalizeDouble(openPrice - (initialRisk * newSL_R), g_symbolDigits);
+
+           // Check if the new SL is a valid improvement
+           bool isImproved = (type == POSITION_TYPE_BUY && newSlPrice > currentSl) ||
+                             (type == POSITION_TYPE_SELL && newSlPrice < currentSl);
+           
+           if (isImproved)
+           {
+               if (trade.PositionModify(ticket, newSlPrice, currentTp))
+               {
+                   GlobalVariableSet(trailLevelKey, desiredTrailLevel);
+                   string logReason = StringFormat("PROFIT_%.2fR_SL_TO_+%.2fR", rMultiple, newSL_R);
+                   PrintFormat("M5 TRAIL UPDATE: Profit reached %.2fR. Moving SL to +%.2fR (New SL: %.2f, Level: %d)", rMultiple, newSL_R, newSlPrice, desiredTrailLevel);
+                   LogToCSV("M5_R_TRAIL_UPDATE", SessionToString(snapshot.session), "TRADE_MGMT", priceNow, snapshot.rsi, snapshot.fastEma, snapshot.slowEma, snapshot.atr, snapshot.spread, desiredTrailLevel, PositionTypeText(type), logReason);
+               }
+           }
+           else
+           {
+               // If the SL is not an improvement but the level is, update the level to prevent re-calculation.
+               // This can happen if another trailing stop system has already moved the SL further.
+               GlobalVariableSet(trailLevelKey, desiredTrailLevel);
+           }
+       }
+   }
+   // --- End of M5 R-Multiple Trailing Stop ---
 
    string accLockKey = BuildStateKey("acclock",ticket);
    bool isAccLockActive = (GlobalVariableCheck(accLockKey) && GlobalVariableGet(accLockKey) >= 1.0);

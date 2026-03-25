@@ -6,6 +6,15 @@ Supported inputs:
 - .log files from MT5 Strategy Tester / Experts logs
 - .txt files with copied log output
 
+CHANGELOG:
+Version 2.0 (Advanced Log Analytics)
+* Added profit, risk, and R-multiple tracking with inference from SL/TP and results.
+* Implemented BUY vs SELL performance analysis (counts and win rates).
+* Added session-wise performance metrics (win rates per session).
+* Introduced automatic output folder (log analysis) for standard exports.
+* Added trade frequency analysis and trade clustering detection.
+* Improved console summary reporting.
+
 The parser is tolerant of partial fields and focuses on GoldEA-style lines such as:
     [GoldEA] [TREND] BUY check: price=..., atr=..., score=..., reason=...
     [GoldEA] BUY executed: tradeId=1 lot=0.01 entry=...
@@ -23,7 +32,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -83,9 +92,14 @@ class Event:
     score: float | None
     atr: float | None
     price: float | None
+    sl: float | None
+    tp: float | None
     reason: str
     result: str
     trade_id: str
+    profit: float | None
+    risk: float | None
+    r_multiple: float | None
     raw: str
 
 
@@ -200,9 +214,14 @@ def build_event(
     score: float | None = None,
     atr: float | None = None,
     price: float | None = None,
+    sl: float | None = None,
+    tp: float | None = None,
     reason: str = "",
     result: str = "",
     trade_id: str = "",
+    profit: float | None = None,
+    risk: float | None = None,
+    r_multiple: float | None = None,
     raw: str = "",
 ) -> Event:
     return Event(
@@ -217,9 +236,14 @@ def build_event(
         score=score,
         atr=atr,
         price=price,
+        sl=sl,
+        tp=tp,
         reason=clean_reason(reason),
         result=result,
         trade_id=trade_id,
+        profit=profit,
+        risk=risk,
+        r_multiple=r_multiple,
         raw=raw.strip(),
     )
 
@@ -252,6 +276,8 @@ def parse_check_line(line: str, source_file: Path, ea_type: str) -> Event | None
     score = parse_float(kv.get("score"))
     atr = parse_float(kv.get("atr"))
     price = parse_float(kv.get("price"))
+    sl = parse_float(kv.get("sl"))
+    tp = parse_float(kv.get("tp"))
 
     executed_hint = clean_reason(reason) in VALID_REASONS
     result = "PENDING" if executed_hint else "SKIPPED"
@@ -267,6 +293,8 @@ def parse_check_line(line: str, source_file: Path, ea_type: str) -> Event | None
         score=score,
         atr=atr,
         price=price,
+        sl=sl,
+        tp=tp,
         reason=reason,
         result=result,
         raw=line,
@@ -295,6 +323,8 @@ def parse_execution_line(line: str, source_file: Path, ea_type: str) -> Event | 
         score=parse_float(kv.get("score")),
         atr=parse_float(kv.get("atr")),
         price=parse_float(kv.get("entry") or kv.get("price")),
+        sl=parse_float(kv.get("sl")),
+        tp=parse_float(kv.get("tp")),
         reason=kv.get("reason", "EXECUTED"),
         result="EXECUTED",
         trade_id=trade_id_match.group(1) if trade_id_match else "",
@@ -313,6 +343,9 @@ def parse_result_line(line: str, source_file: Path, ea_type: str) -> Event | Non
     trade_match = TRADE_ID_RE.search(line)
     ticket_match = TICKET_RE.search(line)
     side_match = BUY_SELL_RE.search(line)
+    
+    profit_match = re.search(r"profit=([-\d.]+)", line, re.IGNORECASE)
+    profit = parse_float(profit_match.group(1)) if profit_match else None
 
     if match.group("stop"):
         return build_event(
@@ -325,6 +358,7 @@ def parse_result_line(line: str, source_file: Path, ea_type: str) -> Event | Non
             reason="STOP_LOSS_HIT",
             result="LOSS",
             trade_id=(trade_match.group(1) if trade_match else ticket_match.group(1) if ticket_match else ""),
+            profit=profit,
             raw=line,
         )
 
@@ -339,6 +373,7 @@ def parse_result_line(line: str, source_file: Path, ea_type: str) -> Event | Non
             reason="TAKE_PROFIT_HIT",
             result="WIN",
             trade_id=(trade_match.group(1) if trade_match else ticket_match.group(1) if ticket_match else ""),
+            profit=profit,
             raw=line,
         )
 
@@ -353,6 +388,7 @@ def parse_result_line(line: str, source_file: Path, ea_type: str) -> Event | Non
             reason="BREAKEVEN",
             result="BREAKEVEN",
             trade_id=(trade_match.group(1) if trade_match else ticket_match.group(1) if ticket_match else ""),
+            profit=profit,
             raw=line,
         )
 
@@ -367,6 +403,7 @@ def parse_result_line(line: str, source_file: Path, ea_type: str) -> Event | Non
             reason="PARTIAL_CLOSE",
             result="PARTIAL",
             trade_id=(trade_match.group(1) if trade_match else ticket_match.group(1) if ticket_match else ""),
+            profit=profit,
             raw=line,
         )
 
@@ -440,6 +477,13 @@ def read_text_auto(path: Path) -> str:
 
 
 def attach_execution_scores(events: list[Event]) -> None:
+    """
+    Links metadata (score, atr, reason, strategy) from SIGNAL_CHECK events 
+    to the corresponding TRADE_EXECUTED events.
+    
+    Args:
+        events: The list of parsed log events.
+    """
     latest_signal_by_side: dict[str, Event] = {}
     for event in events:
         if event.action == "SIGNAL_CHECK":
@@ -460,8 +504,81 @@ def attach_execution_scores(events: list[Event]) -> None:
             event.strategy = signal.strategy
 
 
+def calculate_trade_frequency(executed_events: list[Event]) -> tuple[float | None, int]:
+    """
+    Analyzes trade frequency and detects rapid consecutive trading (clustering).
+    
+    Args:
+        executed_events: A list of TRADE_EXECUTED events.
+        
+    Returns:
+        A tuple of (average_time_between_trades_in_minutes, number_of_clusters_detected)
+    """
+    if len(executed_events) < 2:
+        return None, 0
+        
+    times = []
+    for e in executed_events:
+        try:
+            times.append(datetime.strptime(e.timestamp, "%Y.%m.%d %H:%M:%S"))
+        except ValueError:
+            continue
+            
+    times.sort()
+    diffs = [(times[i] - times[i-1]).total_seconds() for i in range(1, len(times))]
+    
+    if not diffs:
+        return None, 0
+        
+    avg_minutes = (sum(diffs) / len(diffs)) / 60.0
+    # A cluster is defined as a trade occurring less than 5 minutes after the previous one
+    clusters = sum(1 for d in diffs if d < 300)
+    
+    return avg_minutes, clusters
+
+
+def link_trade_outcomes(events: list[Event]) -> None:
+    """
+    Links result events (Wins/Losses) back to execution events using trade_id.
+    Calculates Risk and inferred R-Multiple based on Stop Loss and Profit values.
+    """
+    executions_by_id: dict[str, Event] = {}
+    
+    for event in events:
+        if event.action == "TRADE_EXECUTED" and event.trade_id:
+            executions_by_id[event.trade_id] = event
+            # Pre-calculate risk if we have entry price and SL
+            if event.price is not None and event.sl is not None and event.price != event.sl:
+                event.risk = abs(event.price - event.sl)
+                
+        elif event.result in ("WIN", "LOSS", "BREAKEVEN", "PARTIAL") and event.trade_id:
+            exec_event = executions_by_id.get(event.trade_id)
+            if exec_event:
+                event.risk = exec_event.risk
+                # Infer R-Multiple
+                if event.profit is not None and event.risk and event.risk > 0:
+                    # Real R-Multiple if profit is known
+                    event.r_multiple = event.profit / event.risk
+                elif event.risk and event.risk > 0:
+                    # Heuristic R-Multiple based on result type
+                    if event.result == "LOSS":
+                        event.r_multiple = -1.0
+                    elif event.result == "WIN" and exec_event.tp and exec_event.price:
+                        reward = abs(exec_event.tp - exec_event.price)
+                        event.r_multiple = reward / event.risk
+                    elif event.result == "BREAKEVEN":
+                        event.r_multiple = 0.0
+                    elif event.result == "WIN":
+                        event.r_multiple = 1.0 # Default assumption if TP missing
+
+
 def summarize(events: list[Event]) -> dict[str, object]:
+    """
+    Compiles statistical metrics, win rates, session performance, and R-multiple
+    analysis from the list of raw events.
+    """
     attach_execution_scores(events)
+    link_trade_outcomes(events)
 
     signal_events = [e for e in events if e.action == "SIGNAL_CHECK"]
     executed_events = [e for e in events if e.action == "TRADE_EXECUTED"]
@@ -471,6 +588,9 @@ def summarize(events: list[Event]) -> dict[str, object]:
     win_events = [e for e in events if e.result == "WIN"]
     loss_events = [e for e in events if e.result == "LOSS"]
     resolved_events = win_events + loss_events
+
+    buy_events = [e for e in executed_events if e.trade_type == "BUY"]
+    sell_events = [e for e in executed_events if e.trade_type == "SELL"]
 
     avg_score = safe_average([e.score for e in executed_events if e.score is not None])
     avg_atr = safe_average([e.atr for e in signal_events + executed_events if e.atr is not None])
@@ -488,6 +608,37 @@ def summarize(events: list[Event]) -> dict[str, object]:
     total_skipped = len(skipped_events)
     win_rate = (len(win_events) / total_resolved * 100.0) if total_resolved else 0.0
     loss_rate = (len(loss_events) / total_resolved * 100.0) if total_resolved else 0.0
+
+    # Buy vs Sell Win Rates
+    buy_resolved = [e for e in resolved_events if e.trade_type == "BUY"]
+    sell_resolved = [e for e in resolved_events if e.trade_type == "SELL"]
+    buy_win_rate = (len([e for e in buy_resolved if e.result == "WIN"]) / len(buy_resolved) * 100.0) if buy_resolved else 0.0
+    sell_win_rate = (len([e for e in sell_resolved if e.result == "WIN"]) / len(sell_resolved) * 100.0) if sell_resolved else 0.0
+
+    # Session Performance
+    session_perf = {}
+    for session in {"Asian", "London", "New York", "Off Session"}:
+        s_resolved = [e for e in resolved_events if e.session == session]
+        if s_resolved:
+            s_wins = len([e for e in s_resolved if e.result == "WIN"])
+            session_perf[session] = round(s_wins / len(s_resolved) * 100.0, 2)
+
+    # R-Multiple Analysis
+    r_values = [e.r_multiple for e in resolved_events if e.r_multiple is not None]
+    avg_r = safe_average(r_values)
+    max_r = max(r_values) if r_values else None
+    min_r = min(r_values) if r_values else None
+    
+    r_distribution = {
+        "<= -1R": len([r for r in r_values if r <= -0.9]),
+        "-1R to 0R": len([r for r in r_values if -0.9 < r < 0]),
+        "0R to 1R": len([r for r in r_values if 0 <= r <= 1.0]),
+        "1R to 2R": len([r for r in r_values if 1.0 < r <= 2.0]),
+        "> 2R": len([r for r in r_values if r > 2.0]),
+    } if r_values else {}
+
+    # Trade Frequency
+    avg_time_mins, trade_clusters = calculate_trade_frequency(executed_events)
 
     insights = build_insights(
         total_signals=total_signals,
@@ -509,6 +660,17 @@ def summarize(events: list[Event]) -> dict[str, object]:
         "resolved_trades": total_resolved,
         "win_rate": round(win_rate, 2),
         "loss_rate": round(loss_rate, 2),
+        "buy_trades_executed": len(buy_events),
+        "sell_trades_executed": len(sell_events),
+        "buy_win_rate": round(buy_win_rate, 2),
+        "sell_win_rate": round(sell_win_rate, 2),
+        "avg_r_multiple": round(avg_r, 2) if avg_r is not None else None,
+        "max_r_multiple": round(max_r, 2) if max_r is not None else None,
+        "min_r_multiple": round(min_r, 2) if min_r is not None else None,
+        "r_distribution": r_distribution,
+        "session_win_rates": session_perf,
+        "avg_time_between_trades_minutes": round(avg_time_mins, 2) if avg_time_mins else None,
+        "trade_clusters_detected": trade_clusters,
         "average_score_executed": round(avg_score, 2) if avg_score is not None else None,
         "average_atr": round(avg_atr, 2) if avg_atr is not None else None,
         "top_rejection_reasons": rejection_counter.most_common(10),
@@ -581,6 +743,32 @@ def print_summary(title: str, summary: dict[str, object]) -> None:
     print(f"Resolved Trades: {summary['resolved_trades']}")
     print(f"Win Rate: {summary['win_rate']:.2f}%")
     print(f"Loss Rate: {summary['loss_rate']:.2f}%")
+
+    print()
+    print("--- Directional Performance ---")
+    print(f"BUY Trades Taken: {summary['buy_trades_executed']} (Win Rate: {summary['buy_win_rate']:.2f}%)")
+    print(f"SELL Trades Taken: {summary['sell_trades_executed']} (Win Rate: {summary['sell_win_rate']:.2f}%)")
+
+    print()
+    print("--- R-Multiple & Profitability ---")
+    avg_r = summary['avg_r_multiple']
+    print(f"Average R-Multiple: {avg_r if avg_r is not None else 'N/A'}")
+    print(f"Max R-Multiple (Best Trade): {summary['max_r_multiple'] if summary['max_r_multiple'] is not None else 'N/A'}")
+    print(f"Min R-Multiple (Worst Trade): {summary['min_r_multiple'] if summary['min_r_multiple'] is not None else 'N/A'}")
+    if summary['r_distribution']:
+        print("R-Multiple Distribution:")
+        for band, count in summary['r_distribution'].items():
+            print(f"  {band}: {count} trades")
+            
+    print()
+    print("--- Session & Frequency Insights ---")
+    if summary['session_win_rates']:
+        for session, rate in summary['session_win_rates'].items():
+            print(f"Win Rate ({session}): {rate:.2f}%")
+    avg_time = summary['avg_time_between_trades_minutes']
+    print(f"Avg Time Between Trades: {f'{avg_time} mins' if avg_time else 'N/A'}")
+    print(f"Rapid Consecutive Trades (Clusters): {summary['trade_clusters_detected']}")
+    print()
 
     avg_score = summary["average_score_executed"]
     avg_atr = summary["average_atr"]
@@ -674,9 +862,14 @@ def export_events_csv(path: Path, events: list[Event]) -> None:
         "score",
         "atr",
         "price",
+        "sl",
+        "tp",
         "reason",
         "result",
         "trade_id",
+        "profit",
+        "risk",
+        "r_multiple",
         "raw",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -690,7 +883,7 @@ def export_summary_csv(path: Path, summary: dict[str, object]) -> None:
         writer = csv.writer(handle)
         writer.writerow(["metric", "value"])
         for key, value in summary.items():
-            if isinstance(value, list):
+            if isinstance(value, (list, dict)):
                 writer.writerow([key, json.dumps(value)])
             else:
                 writer.writerow([key, value])
@@ -702,7 +895,7 @@ def export_multi_summary_csv(path: Path, summaries: dict[str, dict[str, object]]
         writer.writerow(["ea_type", "metric", "value"])
         for ea_type, summary in summaries.items():
             for key, value in summary.items():
-                if isinstance(value, list):
+                if isinstance(value, (list, dict)):
                     writer.writerow([ea_type, key, json.dumps(value)])
                 else:
                     writer.writerow([ea_type, key, value])
@@ -740,6 +933,23 @@ def main() -> int:
 
     print_comparison(summaries.get("M1"), summaries.get("M5"))
 
+    # --- Automatic Directory Export (log analysis/) ---
+    output_dir = Path(__file__).parent / "log analysis"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Always save copies to the standard output folder
+    export_events_csv(output_dir / "events.csv", all_events)
+    if len(summaries) <= 1 and summaries:
+        export_summary_csv(output_dir / "summary.csv", next(iter(summaries.values())))
+    elif summaries:
+        export_multi_summary_csv(output_dir / "summary.csv", summaries)
+    export_json(output_dir / "data.json", {
+        "summaries": summaries,
+        "data": {ea_type: [asdict(event) for event in ea_events] for ea_type, ea_events in data.items()},
+        "events": [asdict(event) for event in all_events],
+    })
+
+    # --- Process Optional CLI Args if Provided ---
     if args.events_csv:
         export_events_csv(Path(args.events_csv), all_events)
     if args.summary_csv:

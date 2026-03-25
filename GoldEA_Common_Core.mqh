@@ -94,6 +94,7 @@ void SetDashboardLabelLine(const string prefix,const string name,const string te
 
 void CleanupLogsByPattern(const string pattern,const int minNameLen,const int dateTokenStart)
   {
+   /*
    if(InpLogRetentionDays <= 0)
       return;
 
@@ -119,6 +120,7 @@ void CleanupLogsByPattern(const string pattern,const int minNameLen,const int da
       while(FileFindNext(searchHandle, fileName));
       FileFindClose(searchHandle);
      }
+   */
   }
 
 #endif // GOLDEA_COMMON_CORE_MQH

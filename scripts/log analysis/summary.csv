@@ -1,0 +1,30 @@
+metric,value
+ea_type,M5
+total_files,1
+total_events,9028
+total_signals,8878
+trades_executed,150
+trades_skipped,8704
+wins,0
+losses,0
+resolved_trades,0
+win_rate,0.0
+loss_rate,0.0
+buy_trades_executed,18
+sell_trades_executed,132
+buy_win_rate,0.0
+sell_win_rate,0.0
+avg_r_multiple,
+max_r_multiple,
+min_r_multiple,
+r_distribution,{}
+session_win_rates,{}
+avg_time_between_trades_minutes,206.51
+trade_clusters_detected,0
+average_score_executed,91.23
+average_atr,9.57
+top_rejection_reasons,"[[""HIGH_PENALTY_REJECTION"", 4062], [""RANGE_PENALTY_REJECTION"", 2940], [""SESSION_BLOCKED_LOW_SCORE"", 660], [""MIN_ATR_REJECT"", 389], [""MOMENTUM_REJECT"", 327], [""MICRO_TREND_REJECT"", 153], [""SCORE_TOO_LOW"", 152], [""SPREAD_TOO_HIGH"", 12], [""OUT_OF_SESSION_OVERRIDE"", 9]]"
+reasons,"[[""HIGH_PENALTY_REJECTION"", 4062], [""RANGE_PENALTY_REJECTION"", 2940], [""SESSION_BLOCKED_LOW_SCORE"", 660], [""MIN_ATR_REJECT"", 389], [""MOMENTUM_REJECT"", 327], [""SETUP_VALID"", 317], [""MICRO_TREND_REJECT"", 153], [""SCORE_TOO_LOW"", 152], [""OUT_OF_SESSION_OVERRIDE"", 16], [""SPREAD_TOO_HIGH"", 12]]"
+sessions,"[[""New York"", 3291], [""Asian"", 3077], [""London"", 1959], [""Off Session"", 701]]"
+actions,"[[""SIGNAL_CHECK"", 8878], [""TRADE_EXECUTED"", 150]]"
+insights,"[""Trade conversion is low; filters may be blocking most setups."", ""Most signals were blocked by HIGH_PENALTY_REJECTION (46.7% of rejections)."", ""Executed trades are generally high-conviction based on score."", ""Most signal activity occurred during the New York session (3291 events).""]"

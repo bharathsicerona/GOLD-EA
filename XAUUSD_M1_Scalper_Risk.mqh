@@ -1,147 +1,93 @@
 #ifndef XAUUSD_M1_SCALPER_RISK_MQH
 #define XAUUSD_M1_SCALPER_RISK_MQH
 
+// --- Helper Functions ---
 double GetMinimumStopDistance()
-  {
-   int stopsLevelPoints = (int)SymbolInfoInteger(InpTradeSymbol, SYMBOL_TRADE_STOPS_LEVEL);
-   double bufferPoints = 20.0;
-   double minDistance = (stopsLevelPoints + bufferPoints) * _Point;
-   if(minDistance <= 0.0)
-      minDistance = 50.0 * _Point;
-   return minDistance;
-  }
+{
+    int stopsLevelPoints = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    return (stopsLevelPoints + 20) * _Point; // 2-pip buffer
+}
 
 double NormalizeStopDistance(const double requestedDistance)
-  {
-   return MathMax(requestedDistance, GetMinimumStopDistance());
-  }
+{
+    return MathMax(requestedDistance, GetMinimumStopDistance());
+}
 
-double CalculateDynamicLotSize(const double stopDistance)
-  {
-   double normalizedStop = NormalizeStopDistance(stopDistance);
-   double equity    = AccountInfoDouble(ACCOUNT_EQUITY);
-   double riskPct   = InpMaxRiskPercent;
+//+------------------------------------------------------------------+
+//| CalculateHighRiskLotSize - New Lot Sizing Logic                  |
+//+------------------------------------------------------------------+
+double CalculateHighRiskLotSize(const double stopDistanceInPrice)
+{
+    // --- 1. Determine Risk Percentage ---
+    double riskPercent = InpEnableHighRiskMode ? InpHighRiskPercent : 2.0; // Default to 2% if high-risk mode is off
 
-   if(g_consecutiveLosses >= 2)
-      riskPct *= 0.50;
-   else if(g_consecutiveLosses == 1)
-      riskPct *= 0.75;
+    // --- 2. Calculate Risk Amount ---
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+    double riskAmount = equity * (riskPercent / 100.0);
 
-   double riskAmount = equity * (riskPct / 100.0);
-   double tickSize   = SymbolInfoDouble(InpTradeSymbol, SYMBOL_TRADE_TICK_SIZE);
-   double tickValue  = SymbolInfoDouble(InpTradeSymbol, SYMBOL_TRADE_TICK_VALUE);
+    // --- 3. Calculate Lot Size ---
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
 
-   if(tickSize <= 0.0 || tickValue <= 0.0 || normalizedStop <= 0.0 || riskAmount <= 0.0)
-      return 0.0;
+    if (tickValue <= 0 || stopDistanceInPrice <= 0) return 0.0;
 
-   double moneyPerLot = (normalizedStop / tickSize) * tickValue;
-   if(moneyPerLot <= 0.0)
-      return 0.0;
+    double costPerLot = (stopDistanceInPrice / tickSize) * tickValue;
+    if (costPerLot <= 0.0) return 0.0;
 
-   double rawLot = riskAmount / moneyPerLot;
-   double finalLot = NormalizeVolume(rawLot);
-   double minLot = SymbolInfoDouble(InpTradeSymbol, SYMBOL_VOLUME_MIN);
-   if(minLot <= 0.0) minLot = 0.01;
+    double rawLot = riskAmount / costPerLot;
 
-   if(finalLot < minLot)
-      return 0.0;
+    // --- 4. Handle Broker Volume Limits & User Preference ---
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
-   return finalLot;
-  }
+    // Normalize the raw lot size according to the lot step
+    double normalizedLot = lotStep * floor(rawLot / lotStep);
 
-bool HasSufficientMargin(const ENUM_POSITION_TYPE type,const double volume,const double entryPrice)
-  {
-   if(volume <= 0.0)
-      return false;
+    if (normalizedLot < minLot)
+    {
+        if (InpMinLotAction == MIN_LOT_FORCE)
+        {
+            // Use broker's minimum lot, but only if it doesn't exceed max lot
+            return (minLot > maxLot) ? 0.0 : minLot;
+        }
+        else // MIN_LOT_SKIP
+        {
+            DebugPrint(StringFormat("Lot size (%.2f) is below minimum (%.2f). Skipping trade.", normalizedLot, minLot));
+            return 0.0;
+        }
+    }
 
-   ENUM_ORDER_TYPE orderType = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   double marginRequired = 0.0;
-   if(!OrderCalcMargin(orderType, InpTradeSymbol, volume, entryPrice, marginRequired))
-     {
-      DebugPrint(StringFormat("OrderCalcMargin failed. Error=%d", GetLastError()));
-      return false;
-     }
+    // Clamp to max lot size
+    if (normalizedLot > maxLot)
+    {
+        normalizedLot = maxLot;
+    }
 
-   double freeMargin = AccountInfoDouble(ACCOUNT_FREEMARGIN);
-   return (freeMargin >= marginRequired * 1.5);
-  }
+    return normalizedLot;
+}
 
-void ResetTradeMinuteCounterIfNeeded()
-  {
-   datetime now = TimeTradeServer();
-   datetime currentMinute = now - (now % 60);
-   if(currentMinute != g_tradeMinuteStamp)
-     {
-      g_tradeMinuteStamp = currentMinute;
-      g_tradesThisMinute = 0;
-     }
-  }
+
+// --- Margin and Cooldown Checks (Largely unchanged) ---
+bool HasSufficientMargin(const ENUM_POSITION_TYPE type, const double volume, const double entryPrice)
+{
+    if (volume <= 0.0) return false;
+    double marginRequired = 0.0;
+    if (!OrderCalcMargin((type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, _Symbol, volume, entryPrice, marginRequired))
+    {
+        return false;
+    }
+    return (AccountInfoDouble(ACCOUNT_MARGIN_FREE) >= marginRequired * 1.5);
+}
 
 bool IsCooldownActive()
-  {
-   datetime now = TimeTradeServer();
-
-   if(InpCooldownSeconds > 0 && (now - g_lastTradeTime) < InpCooldownSeconds)
-      return true;
-
-   if(InpLossCooldownSeconds > 0 && g_lastLossTime > 0 && (now - g_lastLossTime) < InpLossCooldownSeconds)
-      return true;
-
-   return false;
-  }
-
-bool CanPlaceTrade(const DecisionContext &context,string &reason,double &entryPrice,double &stopDistance,double &lotSize)
-  {
-   reason = "";
-   entryPrice = (context.type == POSITION_TYPE_BUY) ? SymbolInfoDouble(InpTradeSymbol, SYMBOL_ASK)
-                                                    : SymbolInfoDouble(InpTradeSymbol, SYMBOL_BID);
-
-   if(!context.valid)
-     {
-      reason = context.reason;
-      return false;
-     }
-
-   if(HasOpenPosition())
-     {
-      reason = "MAX_GLOBAL_TRADES_REACHED";
-      return false;
-     }
-
-   ResetTradeMinuteCounterIfNeeded();
-   if(g_tradesThisMinute >= InpMaxTradesPerMinute)
-     {
-      reason = "MAX_TRADES_PER_MINUTE";
-      return false;
-     }
-
-   if(InpMaxConsecutiveLosses > 0 && g_consecutiveLosses >= InpMaxConsecutiveLosses)
-     {
-      reason = "MAX_CONSECUTIVE_LOSSES";
-      return false;
-     }
-
-   if(IsCooldownActive())
-     {
-      reason = "COOLDOWN_ACTIVE";
-      return false;
-     }
-
-   stopDistance = NormalizeStopDistance(context.atr * InpStopAtrMultiplier);
-   lotSize = CalculateDynamicLotSize(stopDistance);
-   if(lotSize <= 0.0)
-     {
-      reason = "LOT_SIZE_ZERO";
-      return false;
-     }
-
-   if(!HasSufficientMargin(context.type, lotSize, entryPrice))
-     {
-      reason = "INSUFFICIENT_MARGIN";
-      return false;
-     }
-
-   return true;
-  }
+{
+    datetime now = TimeTradeServer();
+    if (g_lastLossTime > 0 && InpCooldownAfterLoss > 0 && (now - g_lastLossTime) < InpCooldownAfterLoss)
+    {
+        return true;
+    }
+    return false;
+}
 
 #endif // XAUUSD_M1_SCALPER_RISK_MQH
