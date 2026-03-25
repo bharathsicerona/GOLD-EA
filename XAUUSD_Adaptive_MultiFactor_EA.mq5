@@ -1,6 +1,6 @@
 #property strict
-#property version   "4.00"
-#property description "M5 Adaptive Multi-Factor EA v4 for XAUUSDm on MT5 with CSV logging and dashboard"
+#property version   "4.20"
+#property description "M5 Adaptive Multi-Factor EA v4.2 & M1 v2.2 for XAUUSDm on MT5 - Enhanced Trade Execution"
 
 #include <Trade/Trade.mqh>
 

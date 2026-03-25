@@ -74,7 +74,19 @@ DecisionContext RunScalperStrategy(const ENUM_POSITION_TYPE direction, const boo
    ENUM_SESSION currentSession = GetCurrentSession();
    ctx.sessionName = SessionToString(currentSession);
    ctx.strategyName = "SCALPER_TREND";
-   
+
+   // --- FIX #1: HARD BLOCK ASIAN SESSION ---
+   // Immediately reject any trade if Asian session is disabled via inputs.
+   if(currentSession == SESSION_ASIAN && !InpEnableAsianSession)
+     {
+      ctx.status = "BLOCKED";
+      ctx.valid = false;
+      ctx.reason = "ASIAN_SESSION_DISABLED";
+      if(isBarClose)
+         DebugPrint(StringFormat("[%s] %s: Hard block for Asian session.", ctx.strategyName, PositionTypeText(direction)));
+      return ctx;
+     }
+
    ctx.price = (SymbolInfoDouble(InpTradeSymbol,SYMBOL_BID) + SymbolInfoDouble(InpTradeSymbol,SYMBOL_ASK)) * 0.5;
    ctx.isCounterTrend = false;
    ctx.riskPercent = InpMaxRiskPercent;
@@ -94,7 +106,8 @@ DecisionContext RunScalperStrategy(const ENUM_POSITION_TYPE direction, const boo
 
    int shift = isBarClose ? 1 : 0;
    MqlRates rates[];
-   if(!GetRates(rates, shift + 1))
+   // FIX: Always get at least 2 bars for Momentum & Micro-Trend checks.
+   if(!GetRates(rates, 2))
      {
       ctx.valid = false;
       ctx.reason = "NO_DATA";
@@ -133,6 +146,10 @@ DecisionContext RunScalperStrategy(const ENUM_POSITION_TYPE direction, const boo
    double open = rates[shift].open;
 
    bool trendOk = false, momOk = false, rsiOk = false, pullOk = false, candleOk = false;
+   // --- FIX #3 & #4: New mandatory filter conditions ---
+   bool momentumCandleOk = false;
+   bool microTrendOk = false;
+   
    bool emaGapOk = (MathAbs(ema20 - ema50) / _Point >= InpMinEmaGapPoints);
    int rawScore = 0;
 
@@ -143,6 +160,10 @@ DecisionContext RunScalperStrategy(const ENUM_POSITION_TYPE direction, const boo
       rsiOk   = (rsi >= InpRsiBuyMin && rsi <= InpRsiBuyMax);
       pullOk  = (MathAbs(low - ema20) <= atrValue * InpPullbackAtrFactor);
       candleOk = (close > open);
+      // FIX #3: Momentum Confirmation: only if Close[1] > Open[1]
+      momentumCandleOk = (rates[1].close > rates[1].open);
+      // FIX #4: Micro Trend Filter: only if Close[0] >= Close[1]
+      microTrendOk = (rates[0].close >= rates[1].close);
      }
    else
      {
@@ -151,9 +172,13 @@ DecisionContext RunScalperStrategy(const ENUM_POSITION_TYPE direction, const boo
       rsiOk   = (rsi >= InpRsiSellMin && rsi <= InpRsiSellMax);
       pullOk  = (MathAbs(high - ema20) <= atrValue * InpPullbackAtrFactor);
       candleOk = (close < open);
+      // FIX #3: Momentum Confirmation: only if Close[1] < Open[1]
+      momentumCandleOk = (rates[1].close < rates[1].open);
+      // FIX #4: Micro Trend Filter: only if Close[0] <= Close[1]
+      microTrendOk = (rates[0].close <= rates[1].close);
      }
 
-   // Map pseudo-score matching the M5 visual feel
+   // Map pseudo-score matching the M5 visual feel (DO NOT CHANGE)
    if(trendOk) rawScore += 20;
    if(momOk) rawScore += 20;
    if(rsiOk) rawScore += 20;
@@ -162,17 +187,21 @@ DecisionContext RunScalperStrategy(const ENUM_POSITION_TYPE direction, const boo
    if(candleOk) rawScore += 10;
    
    ctx.score = rawScore;
-   bool volOk = (atrValue / _Point >= InpMinAtrPoints);
-   bool sessionOk = (!isAsianBlockedSession || ctx.score >= 90);
+   // FIX #2: Minimum ATR Filter: Reject trades if atr < 8.0
+   bool volOk = (atrValue / _Point >= 8.0);
+   bool sessionOk = !isAsianBlockedSession;
    bool trendAdaptiveOk = ((trendOk && momOk) || ctx.score >= 80);
-   bool candleAdaptiveOk = (candleOk || ctx.score >= 80);
-   bool structureOk = trendAdaptiveOk && rsiOk && pullOk && candleAdaptiveOk && emaGapOk;
+   // FIX: OLD `candleAdaptiveOk` is removed and new mandatory filters are added
+   bool structureOk = trendAdaptiveOk && rsiOk && pullOk && candleOk && emaGapOk && momentumCandleOk && microTrendOk;
    
    ctx.valid = sessionOk && spreadOk && volOk && structureOk;
 
+   // Update reason string for better debuggging
    if(!sessionOk) ctx.reason = "ASIAN_DISABLED";
    else if(!spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
-   else if(!volOk) ctx.reason = "WEAK_VOLATILITY";
+   else if(!volOk) ctx.reason = "WEAK_VOLATILITY (ATR < 8.0)";
+   else if(!momentumCandleOk) ctx.reason = "NO_MOMENTUM_CANDLE";
+   else if(!microTrendOk) ctx.reason = "MICRO_TREND_FAIL";
    else if(!emaGapOk) ctx.reason = "WEAK_TREND";
    else if(!(trendOk && momOk) && ctx.score < 80) ctx.reason = "UNSTABLE_TREND";
    else if(!candleOk && ctx.score < 80) ctx.reason = "NO_CANDLE_CONFIRM";

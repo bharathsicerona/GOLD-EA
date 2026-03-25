@@ -85,16 +85,18 @@ DecisionContext RunRangeStrategy(const ENUM_POSITION_TYPE direction,const Indica
    int maxScore = InpWeightRsi + InpWeightRangeBB;
    ctx.score = maxScore > 0 ? (int)MathRound((double)rawScore * 100.0 / (double)maxScore) : 0;
 
-   int minScore = 65;
-   bool structureOk = rsiOk && bbOk;
-   bool adaptiveRangeOk = structureOk || (ctx.score >= minScore && (rsiOk || bbOk));
-   bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= minScore);
-   ctx.valid = snapshot.spreadOk && adaptiveRangeOk && scoreOk;
+   int penalty = 0;
+   if(!rsiOk) penalty += 15;
+   if(!bbOk) penalty += 15;
+
+   ctx.score -= penalty;
+   if(ctx.score > 100) ctx.score = 100;
+   if(ctx.score < 0) ctx.score = 0;
+
+   ctx.valid = snapshot.spreadOk && (InpUseScoring == SCORE_DISABLED || ctx.score >= InpMinimumScore);
 
    if(!snapshot.spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
-   else if(!adaptiveRangeOk && ctx.score < 85) ctx.reason = "RANGE_STRUCTURE_FAIL";
-   else if(!adaptiveRangeOk) ctx.reason = "RANGE_NEAR_MISS";
-   else if(!scoreOk) ctx.reason = "SCORE_TOO_LOW";
+   else if(!ctx.valid) ctx.reason = (penalty >= 15) ? "RANGE_PENALTY_REJECTION" : "SCORE_TOO_LOW";
    else ctx.reason = "SETUP_VALID";
 
    return ctx;
@@ -149,34 +151,33 @@ DecisionContext RunBreakoutStrategy(const ENUM_POSITION_TYPE direction,const Ind
 
    if(rangeDetected && breakOk)
       ctx.score += 20;
+   else if(rangeDetected && !breakOk)
+      ctx.score -= 10;
+      
    if((snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK) && snapshot.adx > 25.0)
       ctx.score += 15;
-   if(!breakOk)
-      ctx.score -= 20;
-   if(ctx.score > 100) ctx.score = 100;
-   if(ctx.score < 0) ctx.score = 0;
 
    bool adxOk = (snapshot.adx > InpAdxThreshold);
    bool emaGapOk = snapshot.emaGapOk;
    bool persistenceOk = (direction == POSITION_TYPE_BUY) ? snapshot.trendPersistentBuy : snapshot.trendPersistentSell;
    bool structureOk = trendOk && rsiOk && pullbackOk;
-    int minScore = 75;
-   bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= minScore);
-   bool strongTrendOverride = (ctx.score >= 90);
-   bool trendOverride = (!breakOk && trendOk && adxOk && ctx.score >= 80);
-   bool adaptivePersistenceOk = persistenceOk || ctx.score >= 85;
-   bool adaptiveStructureOk = structureOk || ctx.score >= 85;
 
-   ctx.valid = snapshot.spreadOk && adxOk && (emaGapOk || strongTrendOverride) && (adaptivePersistenceOk || strongTrendOverride) && (adaptiveStructureOk || strongTrendOverride) && scoreOk && (breakOk || trendOverride);
+   int penalty = 0;
+   if(!adxOk) penalty += 10;           // WEAK_TREND
+   if(!emaGapOk) penalty += 15;        // SIDEWAYS_MARKET
+   if(!persistenceOk) penalty += 10;   // UNSTABLE_TREND
+   if(!structureOk) penalty += 15;     // TREND_STRUCTURE_FAIL
+   if(!breakOk && !rangeDetected) penalty += 10; // Extra penalty if no breakout and not in range
+
+   ctx.score -= penalty;
+   if(ctx.score > 100) ctx.score = 100;
+   if(ctx.score < 0) ctx.score = 0;
+
+   ctx.valid = snapshot.spreadOk && (InpUseScoring == SCORE_DISABLED || ctx.score >= InpMinimumScore);
 
    if(!snapshot.spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
-   else if(!adxOk) ctx.reason = "WEAK_TREND";
-   else if(!emaGapOk && !strongTrendOverride) ctx.reason = "SIDEWAYS_MARKET";
-   else if(!adaptivePersistenceOk && !strongTrendOverride) ctx.reason = "UNSTABLE_TREND";
-   else if(!adaptiveStructureOk && !strongTrendOverride) ctx.reason = "TREND_STRUCTURE_FAIL";
-   else if(!breakOk && !trendOverride) ctx.reason = "WEAK_BREAKOUT";
-   else if(!scoreOk) ctx.reason = "SCORE_TOO_LOW";
-   else ctx.reason = strongTrendOverride ? "SETUP_VALID_OVERRIDE" : "SETUP_VALID";
+   else if(!ctx.valid) ctx.reason = (penalty >= 15) ? "HIGH_PENALTY_REJECTION" : "SCORE_TOO_LOW";
+   else ctx.reason = "SETUP_VALID";
 
    return ctx;
   }
@@ -225,28 +226,27 @@ DecisionContext RunTrendStrategy(const ENUM_POSITION_TYPE direction,const Indica
 
    if((snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK) && snapshot.adx > 25.0)
       ctx.score += 15;
-   if(ctx.score > 100) ctx.score = 100;
-   if(ctx.score < 0) ctx.score = 0;
 
    bool adxOk = (snapshot.adx > InpAdxThreshold);
    bool emaGapOk = snapshot.emaGapOk;
    bool persistenceOk = (direction == POSITION_TYPE_BUY) ? snapshot.trendPersistentBuy : snapshot.trendPersistentSell;
    bool structureOk = trendOk && rsiOk && pullbackOk;
-   int minScore = 75;
-   bool scoreOk = (InpUseScoring == SCORE_DISABLED || ctx.score >= minScore);
-   bool strongTrendOverride = (ctx.score >= 90);
-   bool adaptivePersistenceOk = persistenceOk || ctx.score >= 85;
-   bool adaptiveStructureOk = structureOk || ctx.score >= 85;
 
-   ctx.valid = snapshot.spreadOk && adxOk && (emaGapOk || strongTrendOverride) && (adaptivePersistenceOk || strongTrendOverride) && (adaptiveStructureOk || strongTrendOverride) && scoreOk;
+   int penalty = 0;
+   if(!adxOk) penalty += 10;
+   if(!emaGapOk) penalty += 15;
+   if(!persistenceOk) penalty += 10;
+   if(!structureOk) penalty += 15;
+
+   ctx.score -= penalty;
+   if(ctx.score > 100) ctx.score = 100;
+   if(ctx.score < 0) ctx.score = 0;
+
+   ctx.valid = snapshot.spreadOk && (InpUseScoring == SCORE_DISABLED || ctx.score >= InpMinimumScore);
 
    if(!snapshot.spreadOk) ctx.reason = "SPREAD_TOO_HIGH";
-   else if(!adxOk) ctx.reason = "WEAK_TREND";
-   else if(!emaGapOk && !strongTrendOverride) ctx.reason = "SIDEWAYS_MARKET";
-   else if(!adaptivePersistenceOk && !strongTrendOverride) ctx.reason = "UNSTABLE_TREND";
-   else if(!adaptiveStructureOk && !strongTrendOverride) ctx.reason = "TREND_STRUCTURE_FAIL";
-   else if(!scoreOk) ctx.reason = "SCORE_TOO_LOW";
-   else ctx.reason = strongTrendOverride ? "SETUP_VALID_OVERRIDE" : "SETUP_VALID";
+   else if(!ctx.valid) ctx.reason = (penalty >= 15) ? "HIGH_PENALTY_REJECTION" : "SCORE_TOO_LOW";
+   else ctx.reason = "SETUP_VALID";
 
    return ctx;
   }
@@ -255,33 +255,6 @@ DecisionContext SelectAndRunStrategy(const ENUM_POSITION_TYPE direction,const In
   {
    DecisionContext ctx;
    bool sessionOk = (snapshot.session == SESSION_ASIAN || snapshot.session == SESSION_LONDON || snapshot.session == SESSION_NEWYORK);
-
-   if(!sessionOk)
-     {
-      ctx.type = direction;
-      ctx.action = "SIGNAL_CHECK";
-      ctx.phase = "UNSPECIFIED";
-      ctx.decision = PositionTypeText(direction);
-      ctx.sessionName = SessionToString(snapshot.session);
-      ctx.strategyName = "NO_SESSION";
-      ctx.status = "BLOCKED";
-      ctx.price = snapshot.price;
-      ctx.rsi = snapshot.rsi;
-      ctx.ema50 = snapshot.fastEma;
-      ctx.ema200 = snapshot.slowEma;
-      ctx.atr = snapshot.atr;
-      ctx.spread = snapshot.spread;
-      ctx.score = 0;
-      ctx.isCounterTrend = false;
-      ctx.riskPercent = 0.0;
-      ctx.valid = false;
-      ctx.reason = "SESSION_BLOCKED";
-
-      if(isBarClose)
-         DebugPrint(StringFormat("[%s] %s check: price=%.2f atr=%.2f score=%d reason=%s",
-                                 ctx.strategyName, PositionTypeText(direction), ctx.price, ctx.atr, ctx.score, ctx.reason));
-      return ctx;
-     }
 
    if(snapshot.session == SESSION_ASIAN)
       ctx = RunRangeStrategy(direction, snapshot, isBarClose);
@@ -293,6 +266,63 @@ DecisionContext SelectAndRunStrategy(const ENUM_POSITION_TYPE direction,const In
       ctx = RunTrendStrategy(direction, snapshot, isBarClose);
    else
       ctx = RunTrendStrategy(direction, snapshot, isBarClose);
+
+   if(!sessionOk)
+     {
+      ctx.score -= 20;
+      if(ctx.score >= InpMinimumScore)
+        {
+         ctx.valid = snapshot.spreadOk;
+         ctx.reason = "OUT_OF_SESSION_OVERRIDE";
+        }
+      else
+        {
+         ctx.valid = false;
+         ctx.reason = "SESSION_BLOCKED_LOW_SCORE";
+        }
+     }
+
+   if(ctx.valid)
+     {
+      double close0 = iClose(InpTradeSymbol, InpTimeframe, 0);
+      double close1 = iClose(InpTradeSymbol, InpTimeframe, 1);
+      double open1  = iOpen(InpTradeSymbol, InpTimeframe, 1);
+      
+      bool momentumOk = false;
+      bool microTrendOk = false;
+      
+      if(direction == POSITION_TYPE_BUY)
+        {
+         momentumOk = (close1 > open1);
+         microTrendOk = (close0 >= close1);
+        }
+      else if(direction == POSITION_TYPE_SELL)
+        {
+         momentumOk = (close1 < open1);
+         microTrendOk = (close0 <= close1);
+        }
+        
+      if(snapshot.atr < 8.0)
+        {
+         ctx.valid = false;
+         ctx.reason = "MIN_ATR_REJECT";
+        }
+      else if(!momentumOk)
+        {
+         ctx.valid = false;
+         ctx.reason = "MOMENTUM_REJECT";
+        }
+      else if(!microTrendOk)
+        {
+         ctx.valid = false;
+         ctx.reason = "MICRO_TREND_REJECT";
+        }
+      else if(snapshot.session == SESSION_ASIAN && ctx.score < 95)
+        {
+         ctx.valid = false;
+         ctx.reason = "ASIAN_STRICT_REJECT";
+        }
+     }
 
    bool isCT = false;
    if(direction == POSITION_TYPE_BUY && snapshot.closePrice < snapshot.slowEma) isCT = true;

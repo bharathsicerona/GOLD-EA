@@ -579,11 +579,11 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
                     + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
 
    if(netProfit < 0.0)
-      Print(StringFormat("[GoldEA-M5] TRADE_RESULT: LOSS profit=%.2f", netProfit));
+      Print(StringFormat("TRADE_RESULT: LOSS (Profit: %.2f)", netProfit));
    else if(netProfit > 0.0)
-      Print(StringFormat("[GoldEA-M5] TRADE_RESULT: WIN profit=%.2f", netProfit));
+      Print(StringFormat("TRADE_RESULT: WIN (Profit: %.2f)", netProfit));
    else
-      Print(StringFormat("[GoldEA-M5] TRADE_RESULT: BREAKEVEN profit=%.2f", netProfit));
+      Print(StringFormat("TRADE_RESULT: BREAKEVEN (Profit: %.2f)", netProfit));
   }
 
 #endif // XAUUSD_ADAPTIVE_MANAGEMENT_MQH
