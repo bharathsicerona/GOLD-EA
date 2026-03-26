@@ -38,9 +38,9 @@ from typing import Iterable
 
 
 TIMESTAMP_RE = re.compile(r"(?P<ts>\d{4}\.\d{2}\.\d{2} \d{2}:\d{2}:\d{2})")
+EA_PREFIX_RE = re.compile(r"\[(?P<ea_type>M1_SCALPER|M5)\]\[GoldEA\]\s+")
 CHECK_RE = re.compile(
     r"""
-    \[GoldEA\]\s+
     \[(?P<strategy>[^\]]+)\]\s+
     (?P<side>BUY|SELL)\s+check:
     (?P<body>.*)
@@ -49,7 +49,6 @@ CHECK_RE = re.compile(
 )
 EXEC_RE = re.compile(
     r"""
-    \[GoldEA\]\s+
     (?P<side>BUY|SELL)\s+executed:
     (?P<body>.*)
     """,
@@ -57,7 +56,6 @@ EXEC_RE = re.compile(
 )
 RESULT_RE = re.compile(
     r"""
-    \[GoldEA\]\s+
     (?:
         (?P<stop>STOP\s+LOSS\s+HIT)|
         (?P<tp>TAKE\s+PROFIT\s+HIT)|
@@ -75,8 +73,6 @@ TRADE_ID_RE = re.compile(r"tradeId=(\d+)", re.IGNORECASE)
 TICKET_RE = re.compile(r"ticket=(\d+)", re.IGNORECASE)
 BUY_SELL_RE = re.compile(r"\b(BUY|SELL)\b", re.IGNORECASE)
 VALID_REASONS = {"VALID", "READY", "ENTRY_READY", "SETUP_VALID", "SETUP_VALID_OVERRIDE", "EXECUTED"}
-M1_HINTS = ("M1_Scalper", "timeframe=1", "[SCALPER_TREND]")
-M5_HINTS = ("Adaptive_MultiFactor", "timeframe=5", "[TREND]", "[RANGE]")
 
 
 @dataclass
@@ -248,30 +244,39 @@ def build_event(
     )
 
 
-def classify_ea_line(line: str, source_file: Path, current_ea: str = "") -> str:
-    upper_line = line.upper()
-    source_upper = source_file.name.upper()
+def parse_log_file(path: Path) -> list[Event]:
+    """Parses a log file and returns a list of trading events."""
+    events: list[Event] = []
+    text = read_text_auto(path)
+    for line in text.splitlines():
+        prefix_match = EA_PREFIX_RE.search(line)
+        if not prefix_match:
+            continue
+        
+        ea_type = prefix_match.group("ea_type")
+        timestamp = extract_timestamp(line)
+        content = line[prefix_match.end():]
+        
+        event = (
+            parse_check_line(content, path, ea_type, timestamp)
+            or parse_execution_line(content, path, ea_type, timestamp)
+            or parse_result_line(content, path, ea_type, timestamp)
+        )
+        if event:
+            event.raw = line.strip()
+            events.append(event)
+    return events
 
-    if any(hint.upper() in upper_line for hint in M1_HINTS):
-        return "M1"
-    if any(hint.upper() in upper_line for hint in M5_HINTS):
-        return "M5"
-    if "M1_SCALPER" in source_upper:
-        return "M1"
-    if "ADAPTIVE_MULTIFACTOR" in source_upper or "ADAPTIVE_MULTI_FACTOR" in source_upper:
-        return "M5"
-    return current_ea or "UNKNOWN"
 
-
-def parse_check_line(line: str, source_file: Path, ea_type: str) -> Event | None:
+def parse_check_line(line: str, source_file: Path, ea_type: str, timestamp: str) -> Event | None:
+    """Parses a 'check' log line (a potential trade signal)."""
     match = CHECK_RE.search(line)
     if not match:
         return None
 
     body = match.group("body")
     kv = parse_kv_pairs(body)
-    timestamp = extract_timestamp(line)
-    symbol = extract_symbol(line)
+    symbol = extract_symbol(source_file.name)
     reason = kv.get("reason", "UNKNOWN")
     score = parse_float(kv.get("score"))
     atr = parse_float(kv.get("atr"))
@@ -297,19 +302,18 @@ def parse_check_line(line: str, source_file: Path, ea_type: str) -> Event | None
         tp=tp,
         reason=reason,
         result=result,
-        raw=line,
     )
 
 
-def parse_execution_line(line: str, source_file: Path, ea_type: str) -> Event | None:
+def parse_execution_line(line: str, source_file: Path, ea_type: str, timestamp: str) -> Event | None:
+    """Parses a trade execution log line."""
     match = EXEC_RE.search(line)
     if not match:
         return None
 
     body = match.group("body")
     kv = parse_kv_pairs(body)
-    timestamp = extract_timestamp(line)
-    symbol = extract_symbol(line)
+    symbol = extract_symbol(source_file.name)
     trade_id_match = TRADE_ID_RE.search(body)
 
     return build_event(
@@ -319,7 +323,7 @@ def parse_execution_line(line: str, source_file: Path, ea_type: str) -> Event | 
         source_file=source_file,
         action="TRADE_EXECUTED",
         trade_type=match.group("side"),
-        strategy="",
+        strategy=kv.get("strategy", ""),
         score=parse_float(kv.get("score")),
         atr=parse_float(kv.get("atr")),
         price=parse_float(kv.get("entry") or kv.get("price")),
@@ -328,120 +332,54 @@ def parse_execution_line(line: str, source_file: Path, ea_type: str) -> Event | 
         reason=kv.get("reason", "EXECUTED"),
         result="EXECUTED",
         trade_id=trade_id_match.group(1) if trade_id_match else "",
-        raw=line,
     )
 
 
-def parse_result_line(line: str, source_file: Path, ea_type: str) -> Event | None:
+def parse_result_line(line: str, source_file: Path, ea_type: str, timestamp: str) -> Event | None:
+    """Parses a trade result log line (e.g., SL/TP hit, closed)."""
     match = RESULT_RE.search(line)
-    if not match or "[GoldEA]" not in line:
+    if not match:
         return None
 
-    timestamp = extract_timestamp(line)
-    symbol = extract_symbol(line)
-    raw_upper = line.upper()
+    symbol = extract_symbol(source_file.name)
     trade_match = TRADE_ID_RE.search(line)
     ticket_match = TICKET_RE.search(line)
     side_match = BUY_SELL_RE.search(line)
     
     profit_match = re.search(r"profit=([-\d.]+)", line, re.IGNORECASE)
     profit = parse_float(profit_match.group(1)) if profit_match else None
+    trade_id = (trade_match.group(1) if trade_match else ticket_match.group(1) if ticket_match else "")
 
+    action, result = "UNKNOWN", "UNKNOWN"
     if match.group("stop"):
-        return build_event(
-            ea_type=ea_type,
-            timestamp=timestamp,
-            symbol=symbol,
-            source_file=source_file,
-            action="STOP_LOSS_HIT",
-            trade_type=side_match.group(1) if side_match else "",
-            reason="STOP_LOSS_HIT",
-            result="LOSS",
-            trade_id=(trade_match.group(1) if trade_match else ticket_match.group(1) if ticket_match else ""),
-            profit=profit,
-            raw=line,
-        )
-
-    if match.group("tp"):
-        return build_event(
-            ea_type=ea_type,
-            timestamp=timestamp,
-            symbol=symbol,
-            source_file=source_file,
-            action="TAKE_PROFIT_HIT",
-            trade_type=side_match.group(1) if side_match else "",
-            reason="TAKE_PROFIT_HIT",
-            result="WIN",
-            trade_id=(trade_match.group(1) if trade_match else ticket_match.group(1) if ticket_match else ""),
-            profit=profit,
-            raw=line,
-        )
-
-    if match.group("be"):
-        return build_event(
-            ea_type=ea_type,
-            timestamp=timestamp,
-            symbol=symbol,
-            source_file=source_file,
-            action="BREAKEVEN",
-            trade_type=side_match.group(1) if side_match else "",
-            reason="BREAKEVEN",
-            result="BREAKEVEN",
-            trade_id=(trade_match.group(1) if trade_match else ticket_match.group(1) if ticket_match else ""),
-            profit=profit,
-            raw=line,
-        )
-
-    if match.group("partial"):
-        return build_event(
-            ea_type=ea_type,
-            timestamp=timestamp,
-            symbol=symbol,
-            source_file=source_file,
-            action="PARTIAL_CLOSE",
-            trade_type=side_match.group(1) if side_match else "",
-            reason="PARTIAL_CLOSE",
-            result="PARTIAL",
-            trade_id=(trade_match.group(1) if trade_match else ticket_match.group(1) if ticket_match else ""),
-            profit=profit,
-            raw=line,
-        )
-
-    if match.group("skip"):
-        reason = "TRADE_SKIPPED"
-        reason_match = re.search(r"reason=([A-Za-z0-9_]+)", line, re.IGNORECASE)
-        if reason_match:
-            reason = reason_match.group(1)
-        return build_event(
-            ea_type=ea_type,
-            timestamp=timestamp,
-            symbol=symbol,
-            source_file=source_file,
-            action="TRADE_SKIPPED",
-            trade_type=side_match.group(1) if side_match else "",
-            reason=reason,
-            result="SKIPPED",
-            raw=line,
-        )
-
-    if match.group("trail"):
-        return build_event(
-            ea_type=ea_type,
-            timestamp=timestamp,
-            symbol=symbol,
-            source_file=source_file,
-            action="TRAILING_UPDATE",
-            trade_type=side_match.group(1) if side_match else "",
-            reason="TRAILING_UPDATE",
-            result="MANAGEMENT",
-            trade_id=(trade_match.group(1) if trade_match else ticket_match.group(1) if ticket_match else ""),
-            raw=line,
-        )
-
-    if "TRADE EXECUTED" in raw_upper or " EXECUTED:" in raw_upper:
+        action, result = "STOP_LOSS_HIT", "LOSS"
+    elif match.group("tp"):
+        action, result = "TAKE_PROFIT_HIT", "WIN"
+    elif match.group("be"):
+        action, result = "BREAKEVEN", "BREAKEVEN"
+    elif match.group("partial"):
+        action, result = "PARTIAL_CLOSE", "PARTIAL"
+    elif match.group("skip"):
+        action, result = "TRADE_SKIPPED", "SKIPPED"
+    elif match.group("trail"):
+        action, result = "TRAILING_UPDATE", "MANAGEMENT"
+    
+    # Do not parse execution lines here, they are handled by parse_execution_line
+    if "EXECUTED" in line.upper():
         return None
 
-    return None
+    return build_event(
+        ea_type=ea_type,
+        timestamp=timestamp,
+        symbol=symbol,
+        source_file=source_file,
+        action=action,
+        trade_type=side_match.group(1) if side_match else "",
+        reason=action,
+        result=result,
+        trade_id=trade_id,
+        profit=profit,
+    )
 
 
 def parse_log_file(path: Path) -> list[Event]:
@@ -682,8 +620,9 @@ def summarize(events: list[Event]) -> dict[str, object]:
 
 
 def split_by_ea(events: list[Event]) -> dict[str, list[Event]]:
+    """Splits a list of events into a dictionary keyed by EA type."""
     data = {
-        "M1": [],
+        "M1_SCALPER": [],
         "M5": [],
     }
     for event in events:
@@ -924,28 +863,29 @@ def main() -> int:
     data = split_by_ea(all_events)
     summaries: dict[str, dict[str, object]] = {}
 
-    for ea_type in ("M1", "M5"):
-        ea_events = data[ea_type]
+    for ea_type in ("M1_SCALPER", "M5"):
+        ea_events = data.get(ea_type, [])
         if not ea_events:
             continue
         summaries[ea_type] = summarize(ea_events)
         print_summary(ea_type, summaries[ea_type])
 
-    print_comparison(summaries.get("M1"), summaries.get("M5"))
+    print_comparison(summaries.get("M1_SCALPER"), summaries.get("M5"))
 
-    # --- Automatic Directory Export (log analysis/) ---
-    output_dir = Path(__file__).parent / "log analysis"
+    # --- Automatic Directory Export (log_analysis_output/) ---
+    output_dir = Path(__file__).parent.parent / "log_analysis_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Always save copies to the standard output folder
     export_events_csv(output_dir / "events.csv", all_events)
-    if len(summaries) <= 1 and summaries:
+    if len(summaries) == 1:
         export_summary_csv(output_dir / "summary.csv", next(iter(summaries.values())))
-    elif summaries:
+    elif len(summaries) > 1:
         export_multi_summary_csv(output_dir / "summary.csv", summaries)
+        
     export_json(output_dir / "data.json", {
         "summaries": summaries,
-        "data": {ea_type: [asdict(event) for event in ea_events] for ea_type, ea_events in data.items()},
+        "data": {ea_type: [asdict(event) for event in ea_events] for ea_type, ea_events in data.items() if ea_events},
         "events": [asdict(event) for event in all_events],
     })
 
@@ -953,17 +893,17 @@ def main() -> int:
     if args.events_csv:
         export_events_csv(Path(args.events_csv), all_events)
     if args.summary_csv:
-        if len(summaries) <= 1:
+        if len(summaries) <= 1 and summaries:
             only_summary = next(iter(summaries.values()))
             export_summary_csv(Path(args.summary_csv), only_summary)
-        else:
+        elif summaries:
             export_multi_summary_csv(Path(args.summary_csv), summaries)
     if args.json_path:
         export_json(
             Path(args.json_path),
             {
                 "summaries": summaries,
-                "data": {ea_type: [asdict(event) for event in ea_events] for ea_type, ea_events in data.items()},
+                "data": {ea_type: [asdict(event) for event in ea_events] for ea_type, ea_events in data.items() if ea_events},
                 "events": [asdict(event) for event in all_events],
             },
         )

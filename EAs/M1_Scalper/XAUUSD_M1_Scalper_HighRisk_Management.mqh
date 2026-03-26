@@ -70,7 +70,7 @@ void ManageTrailingStop(const ulong ticket, const double profit)
     // --- Modify Position and Log ---
     if (trade.PositionModify(ticket, newSL, currentTP))
     {
-        DebugPrint(StringFormat("PROFIT LOCK: Ticket #%I64u SL moved. Profit reached $%.2f, locking $%.2f.", ticket, profit, targetLockedProfit));
+        Log(StringFormat("PROFIT LOCK: Ticket #%I64u SL moved. Profit reached $%.2f, locking $%.2f.", ticket, profit, targetLockedProfit));
     }
 }
 
@@ -128,7 +128,7 @@ void UpdateDynamicTP(const ulong ticket, const double profit, const double initi
     // --- Modify Position and Log ---
     if (trade.PositionModify(ticket, currentSL, newTpPrice))
     {
-        DebugPrint(StringFormat("DYNAMIC TP: Ticket #%I64u TP extended. Profit reached %.1fR, new TP at %.1fR.", ticket, rMultiple, newTpRR));
+        Log(StringFormat("DYNAMIC TP: Ticket #%I64u TP extended. Profit reached %.1fR, new TP at %.1fR.", ticket, rMultiple, newTpRR));
     }
 }
 

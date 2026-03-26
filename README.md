@@ -1,166 +1,96 @@
-# XAUUSD M1 High-Risk Scalper EA
+# Gold Trading EAs for MetaTrader 5
 
-This document provides a complete overview of the XAUUSD M1 High-Risk Scalper, an aggressive Expert Advisor designed for rapid account growth through high-frequency, momentum-based scalping.
+This project contains a collection of Expert Advisors (EAs) for automated trading of Gold (XAUUSD) on the MetaTrader 5 platform. It includes multiple strategies, shared libraries, and a Python script for advanced log analysis.
 
----
+## Project Structure
 
-## 1. Project Overview
-
-This EA is a specialized trading system engineered exclusively for the **M1 timeframe on XAUUSD**. Its core philosophy is to prioritize **profit maximization and fast compounding** over conservative risk management. It is designed for traders who understand and accept the higher drawdown potential inherent in high-risk, high-reward strategies.
-
-*   **Strategy:** EMA-based Trend & RSI Momentum Pullbacks
-*   **Timeframe:** M1 Only
-*   **Risk Model:** Aggressive, High-Reward
-*   **Key Features:** Step-Based Profit Locking, Dynamic TP Extension
-
----
-
-## 2. System Architecture & Execution Flow
-
-The EA is built on a modular architecture to separate concerns and optimize performance, which is critical for M1 scalping. The execution flow on every tick is lean and efficient.
-
-### Architecture Diagram (Text-Based)
+The project is organized into a clean and modular structure to ensure clarity and maintainability.
 
 ```
-[ OnTick Event ]
-       |
-       v
-[ 1. HasOpenPosition? ]--YES-->[ 2. TradeManager.Manage() ]
-       |                            |
-       |                            +--> ManageTrailingStop()
-       |                            +--> UpdateDynamicTP()
-       |
-       NO
-       |
-       v
-[ 3. IsCooldownActive? ]--YES-->[ END ]
-       |
-       NO
-       |
-       v
-[ 4. EntryEngine.ValidateEntry() ]--INVALID-->[ END ]
-       |
-     VALID (BUY or SELL)
-       |
-       v
-[ 5. RiskManager.CalculateLotSize() ]--ZERO_LOT-->[ END ]
-       |
-       |
-       v
-[ 6. TradeEngine.ExecuteTrade() ]
+.
+├── EAs/
+│   ├── Adaptive/         # M5 Adaptive Multi-Factor EA
+│   ├── M1_Scalper/       # M1 High-Risk Scalper EA
+│   ├── Beginner/         # Beginner-friendly Trend Pullback EA
+│   └── Include/          # Shared MQL5 library files
+├── scripts/
+│   └── analyze_ea_logs.py  # Python script for log analysis
+├── logs/
+│   └── (EA log files are generated here)
+├── log_analysis_output/
+│   └── (Output from the analysis script)
+├── presets/
+│   └── (EA input preset files)
+├── docs/
+│   └── (Supporting documentation)
+├── .gitignore
+└── README.md             # This file
 ```
 
-### Execution Flow Explained
+## Expert Advisors
 
-1.  **Position Check:** The `OnTick()` function first checks if a position managed by this EA is already open.
-2.  **Trade Management:** If a trade is open, control is handed to the **TradeManager**. It calls `ManageTrailingStop()` to lock in profits and `UpdateDynamicTP()` to extend the target on every tick. No new trades are considered.
-3.  **Cooldown:** If no trade is open, the system checks if a cooldown period is active after a recent loss.
-4.  **Entry Validation:** If clear to trade, the **EntryEngine** (`ValidateEntry`) rigorously checks for a valid BUY or SELL signal using a series of hard filters. If no valid signal is found, the process ends for that tick.
-5.  **Risk Calculation:** If a valid signal is found, the **RiskManager** (`CalculateHighRiskLotSize`) calculates the appropriate lot size based on the defined risk percentage.
-6.  **Trade Execution:** Finally, the `ExecuteTrade` function opens the position with the calculated SL, TP, and lot size. It also stores the initial risk value needed for the dynamic TP logic.
+This project includes three distinct Expert Advisors. Each has its own dedicated folder within the `EAs/` directory, containing the main `.mq5` file, any specific `.mqh` include files, and a detailed `README.md`.
 
----
+### 1. M5 Adaptive Multi-Factor EA
 
-## 3. M1 Scalper Strategy: A Deep Dive
+-   **Folder:** `EAs/Adaptive/`
+-   **Strategy:** A sophisticated multi-factor model that adapts to changing market conditions on the M5 timeframe. It dynamically selects from multiple sub-strategies (e.g., Trend, Range, Breakout) based on a scoring system.
+-   **Risk Model:** Flexible, configurable risk management.
+-   **More Info:** See the `EAs/Adaptive/README.md` for a full breakdown of the strategy and its parameters.
 
-The strategy is designed to capture short, explosive momentum bursts on the M1 chart. It is not a trend-following system in the traditional sense; rather, it's a **pullback-to-momentum** strategy.
+### 2. M1 High-Risk Scalper EA
 
-### Core Components
+-   **Folder:** `EAs/M1_Scalper/`
+-   **Strategy:** An aggressive, high-frequency scalping strategy designed for the M1 timeframe. It aims to capture small, rapid price movements.
+-   **Risk Model:** High-risk, high-reward model with features like monetary-based trailing stops.
+-   **More Info:** See the `EAs/M1_Scalper/README.md` for a detailed explanation of its aggressive profit-taking mechanisms.
 
-*   **Trend Baseline (`EMA 50`):** The EA uses a 50-period EMA to establish a short-term trend baseline. For a BUY signal, price must be above the EMA 50; for a SELL, it must be below.
-*   **Momentum (`EMA 20` vs `EMA 50`):** The relationship between the 20 and 50 EMAs confirms the momentum. A BUY requires the EMA 20 to be above the EMA 50.
-*   **The Trigger (Pullback to `EMA 20`):** The actual entry signal is based on the price pulling back towards the `EMA 20`, providing an opportunity to enter the established momentum at a better price.
+### 3. Beginner Trend Pullback EA
 
-### The `ValidateEntry` Filter System
+-   **Folder:** `EAs/Beginner/`
+-   **Strategy:** A simple, easy-to-understand trend-following strategy that enters on pullbacks to a moving average.
+-   **Risk Model:** Basic, percentage-based risk.
+-   **More Info:** This EA is self-contained in a single file for simplicity and is a great starting point for learning EA development.
 
-To ensure high-quality entries and avoid "instant SL hits," every potential trade must pass a strict sequence of hard filters:
+## Installation and Setup
 
-1.  **Session Filter:** The trade must occur during an allowed session (by default, all sessions are enabled in "Aggressive Mode").
-2.  **Spread Filter:** The current broker spread must be below the maximum allowed (`InpMaxSpreadPoints`).
-3.  **Spike Candle Filter:** The previous candle's range (`High - Low`) cannot be excessively large compared to the current ATR. This avoids entering on volatile, unpredictable exhaustion spikes.
-4.  **Candle Confirmation:** The previous candle must have closed in the direction of the trade (e.g., a bullish candle for a BUY signal).
-5.  **RSI Momentum Filter:** The RSI value must be **actively increasing** for a BUY and **decreasing** for a SELL. This "RSI Velocity" check ensures you are entering with momentum, not against it.
+1.  **Clone the Repository:** Clone this repository to your local machine.
+2.  **Locate MT5 Data Folder:** Open MetaTrader 5, go to `File -> Open Data Folder`. This will open the terminal's data directory.
+3.  **Copy EA Files:**
+    -   Copy the entire `EAs` folder from this project into the `MQL5/Experts/` directory inside your MT5 Data Folder.
+4.  **Compile EAs:**
+    -   In MetaTrader 5, open the **MetaEditor** (or press `F4`).
+    -   In the MetaEditor's "Navigator" panel, find the `Experts/EAs` folder.
+    -   Right-click on each of the EA folders (`Adaptive`, `M1_Scalper`, `Beginner`) and click **"Compile"**. This will compile all the necessary `.mq5` and `.mqh` files. Check for any errors in the "Errors" tab.
+5.  **Refresh Experts List:** Back in the main MT5 terminal, right-click on "Expert Advisors" in the "Navigator" panel and select **"Refresh"**. The EAs should now appear.
 
-Only if **all** these conditions are met is a signal considered valid.
+## Running the EAs
 
----
+1.  **Open a Chart:** Open a chart for the desired symbol and timeframe (e.g., `XAUUSD`, `M1` for the Scalper).
+2.  **Attach the EA:** Drag the desired EA from the Navigator onto the chart.
+3.  **Configure Inputs:** In the "Inputs" tab of the EA's properties window, load a preset file or configure the parameters manually.
+4.  **Enable Algo Trading:** In the "Common" tab, ensure that **"Allow Algo Trading"** is checked.
+5.  **Confirmation:** Click `OK`. A smiley face icon next to the EA's name on the chart confirms it is running correctly.
 
-## 4. The Profit Engine: Trailing SL & Dynamic TP
+## Log Analysis with Python
 
-This is the heart of the EA's high-reward philosophy. It is designed to aggressively lock profits and let winners run as far as possible.
+The project includes a powerful Python script to analyze the standardized log files produced by the EAs.
 
-### Step-Based Trailing Stop
+### Requirements
 
-The trailing stop is not based on pips or ATR. It is based on **fixed monetary profit targets**.
+-   Python 3.9+
 
-*   When trade profit reaches **$1.00**, the Stop Loss is immediately moved to lock in **+$0.20**.
-*   When trade profit reaches **$2.00**, the SL is moved to lock in **+$1.00**.
-*   When trade profit reaches **$3.00**, the SL is moved to lock in **+$2.00**.
+### How to Use
 
-This pattern continues indefinitely. **Example:** If the trade profit hits $10.50, the SL will be moved to lock in $9.00 of profit. This mechanism is designed to secure the majority of floating profit with each dollar gained, drastically reducing the risk of a winning trade turning into a loser.
+1.  **Run the EAs:** Let the EAs run in the Strategy Tester or on a live/demo account to generate log files. These will typically be found in the `MQL5/Logs` or `MQL5/Profiles/Tester` directory.
+2.  **Copy Logs:** Copy the relevant `.log` files into the `logs/` directory of this project.
+3.  **Run the Script:** Open a terminal or command prompt, navigate to the `scripts/` directory, and run the script:
 
-### Dynamic Take Profit
+    ```bash
+    cd scripts
+    python analyze_ea_logs.py ../logs/*.log
+    ```
 
-The Take Profit is not static. It expands as the trade proves its strength, allowing the EA to capture massive outlier moves.
-
-*   **Initial TP:** The trade is opened with a standard Take Profit targeting a **3:1 Reward-to-Risk** ratio (3R).
-*   **At 1R Profit:** When the floating profit equals the initial risk (1R), the EA extends the Take Profit target to **4R**.
-*   **At 2R Profit:** If the trade continues to 2R in profit, the EA extends the TP again to **6R**.
-
-This ensures that a strong, trending move is not cut short by a premature Take Profit.
-
----
-
-## 5. The High-Risk Philosophy & Risk Engine
-
-This EA is built for aggressive account growth and operates on a high-risk model.
-
-### Risk & Lot Sizing
-*   **High Risk Per Trade:** The EA is designed to use a high percentage of equity per trade, controlled by `InpHighRiskPercent` (defaulting to 3%, but intended for values from 3-50%).
-*   **Forced Minimum Lot:** Trading with high risk on a low-capital account often results in a calculated lot size that is below the broker's minimum (e.g., 0.01 lots). This EA handles this by **forcing the trade at the minimum lot size** by default. This ensures the EA never misses a valid setup due to capital constraints. This behavior can be configured via the `InpMinLotAction` input.
-*   **Margin Check:** Before placing any trade, the EA calculates the required margin and ensures it is well within the account's free margin to prevent margin call errors.
-
-### Drawdown Expectation
-
-A high-risk strategy will inherently have significant drawdowns. Users should be fully aware that a string of losses is possible and that large swings in equity are a normal part of this strategy's performance profile. The goal is for the large, extended wins to mathematically outweigh the frequent small losses.
-
----
-
-## 6. Installation & Usage
-
-1.  **Copy Files:** Copy the `.mq5` file and all `.mqh` files into your MT5 `MQL5/Experts/` folder. **All files must be in the same folder.**
-2.  **Compile:** Open the `XAUUSD_M1_Scalper_EA.mq5` file in MetaEditor and press `F7` to compile it.
-3.  **Attach:** Drag the EA onto an **M1 Chart** for `XAUUSD`.
-4.  **Settings:** In the `Inputs` tab, review the parameters. Ensure `Allow Algo Trading` is checked in the `Common` tab.
-5.  **Run:** Click `OK`. A smiley face on the chart confirms the EA is running.
-
----
-
-## 7. Backtesting & Optimization Guide
-
-### Backtesting
-*   **Model:** Always use `Every tick based on real ticks` for accuracy.
-*   **Period:** Test over at least 6-12 months of data.
-*   **Focus:** Do not focus on Win Rate. Instead, analyze **Profit Factor** and the **shape of the equity curve**. A jagged curve with large wins is expected.
-
-### Optimization for the M1 Scalper
-When optimizing, focus on the parameters that define entries and the initial stop loss. The trailing logic is fixed.
-
-*   **Phase 1 (Structure):** `InpFastEmaPeriod`, `InpSlowEmaPeriod`.
-*   **Phase 2 (Confirmation):** `InpRsiBuyMin`, `InpRsiBuyMax`, `InpRsiSellMin`, `InpRsiSellMax`.
-*   **Phase 3 (Volatility):** `InpStopAtrMultiplier`, `InpSpikeCandleAtrFactor`.
-
-#### Suggested Starting Parameters for XAUUSD M1
-*   `InpHighRiskPercent`: Start at `3.0` and increase as you get comfortable.
-*   `InpStopAtrMultiplier`: `2.0` - `3.0` (A larger value gives the trade more room to breathe initially).
-*   `InpRewardRiskRatio`: `3.0` (This is the initial target; the dynamic TP will manage it later).
-*   `InpSpikeCandleAtrFactor`: `2.5` - `3.5`.
-*   `InpMaxSpreadPoints`: `300` - `400` (For XAUUSD, a spread of 30-40 pips).
-
----
-
-## 8. Limitations
-
-*   **High Drawdown:** This is not a "safe" or "low-risk" system. It is designed to be aggressive and will experience significant drawdowns.
-*   **Broker Dependency:** Performance is highly sensitive to broker conditions, especially **spread and execution speed (latency)**. It must be run on a low-spread ECN account.
-*   **No News Filter:** The EA does not have a built-in news filter. It will trade during high-impact news, which can lead to extreme volatility and slippage.
+4.  **View Results:**
+    -   A detailed summary will be printed to the console.
+    -   Structured output files (`events.csv`, `summary.csv`, `data.json`) will be automatically saved to the `log_analysis_output/` directory for further analysis in tools like Excel or Pandas.

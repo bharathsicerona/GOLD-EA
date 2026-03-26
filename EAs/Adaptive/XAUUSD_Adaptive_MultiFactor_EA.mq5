@@ -12,11 +12,15 @@ datetime g_lastSellBar      = 0;
 datetime g_lastTradeTime    = 0;
 
 #include "XAUUSD_Adaptive_Inputs.mqh"
-#include "GoldEA_Common_Core.mqh"
+#include "../Include/GoldEA_Common_Core.mqh"
 #include "XAUUSD_Adaptive_Indicators.mqh"
 #include "XAUUSD_Adaptive_Entry.mqh"
 #include "XAUUSD_Adaptive_Risk.mqh"
 #include "XAUUSD_Adaptive_Logging.mqh"
+
+// Define the EA type for logging purposes, as required by XAUUSD_Adaptive_Management.mqh
+string EA_TYPE = "M5";
+
 #include "XAUUSD_Adaptive_Management.mqh"
 
 bool IsNewBar()
@@ -40,42 +44,42 @@ int OnInit()
    g_fastEmaHandle = iMA(InpTradeSymbol,InpTimeframe,InpFastEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
    if(g_fastEmaHandle == INVALID_HANDLE)
      {
-      PrintFormat("Error creating Fast EMA indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError());
+      Log(StringFormat("Error creating Fast EMA indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError()));
       return INIT_FAILED;
      }
 
    g_slowEmaHandle = iMA(InpTradeSymbol,InpTimeframe,InpSlowEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
    if(g_slowEmaHandle == INVALID_HANDLE)
      {
-      PrintFormat("Error creating Slow EMA indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError());
+      Log(StringFormat("Error creating Slow EMA indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError()));
       return INIT_FAILED;
      }
 
    g_rsiHandle = iRSI(InpTradeSymbol,InpTimeframe,InpRsiPeriod,PRICE_CLOSE);
    if(g_rsiHandle == INVALID_HANDLE)
      {
-      PrintFormat("Error creating RSI indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError());
+      Log(StringFormat("Error creating RSI indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError()));
       return INIT_FAILED;
      }
 
    g_bbHandle = iBands(InpTradeSymbol,InpTimeframe,InpBandsPeriod,0,InpBandsDeviation,PRICE_CLOSE);
    if(g_bbHandle == INVALID_HANDLE)
      {
-      PrintFormat("Error creating Bollinger Bands indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError());
+      Log(StringFormat("Error creating Bollinger Bands indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError()));
       return INIT_FAILED;
      }
 
    g_atrHandle = iATR(InpTradeSymbol,InpTimeframe,InpAtrPeriod);
    if(g_atrHandle == INVALID_HANDLE)
      {
-      PrintFormat("Error creating ATR indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError());
+      Log(StringFormat("Error creating ATR indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError()));
       return INIT_FAILED;
      }
 
    g_adxHandle = iADX(InpTradeSymbol,InpTimeframe,InpAdxPeriod);
    if(g_adxHandle == INVALID_HANDLE)
      {
-      PrintFormat("Error creating ADX indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError());
+      Log(StringFormat("Error creating ADX indicator for symbol '%s'. Error code: %d", InpTradeSymbol, GetLastError()));
       return INIT_FAILED;
      }
 
@@ -85,7 +89,7 @@ int OnInit()
    RebuildAsianRangeFromHistory();
    CleanupOldLogs();
 
-   DebugPrint(StringFormat("EA initialized on %s timeframe=%d",InpTradeSymbol,InpTimeframe));
+   Log(StringFormat("EA initialized on %s timeframe=%d",InpTradeSymbol,InpTimeframe));
    LogToCSV("INIT","NONE","NONE",0.0,0.0,0.0,0.0,0.0,0,0,"ACTIVE","EA_INITIALIZED");
    return INIT_SUCCEEDED;
   }

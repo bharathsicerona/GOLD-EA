@@ -4,6 +4,14 @@
 
 #include <Trade/Trade.mqh>
 
+string EA_TYPE = "BEGINNER";
+
+void Log(string message)
+{
+    Print("[" + EA_TYPE + "][GoldEA] " + message);
+}
+
+
 input string           InpTradeSymbol          = "XAUUSDm";
 input ENUM_TIMEFRAMES  InpTimeframe            = PERIOD_M5;
 input ulong            InpMagicNumber          = 26032027;
@@ -130,12 +138,12 @@ double NormalizeVolume(const double volume)
    
    if(normalized < minLot)
      {
-      PrintFormat("[GoldEA] Warning: Calculated lot (%.4f) < Min Lot (%.2f). Forcing Min Lot.", volume, minLot);
+      Log(StringFormat("Warning: Calculated lot (%.4f) < Min Lot (%.2f). Forcing Min Lot.", volume, minLot));
       normalized = minLot;
      }
    else if(normalized > maxLot)
      {
-      PrintFormat("[GoldEA] Warning: Calculated lot (%.2f) > Max Lot (%.2f). Capping to Max Lot.", normalized, maxLot);
+      Log(StringFormat("Warning: Calculated lot (%.2f) > Max Lot (%.2f). Capping to Max Lot.", normalized, maxLot));
       normalized = maxLot;
      }
      
@@ -151,7 +159,7 @@ double CalculateLotSize(const double stopDistance)
   {
    if(stopDistance <= 0.0)
      {
-      Print("[GoldEA] Error: Invalid Stop Loss distance. Distance is 0.");
+      Log("Error: Invalid Stop Loss distance. Distance is 0.");
       return SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) > 0 ? SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) : 0.01;
      }
 
@@ -161,22 +169,22 @@ double CalculateLotSize(const double stopDistance)
 
    if(tickSize <= 0.0 || tickValue <= 0.0)
      {
-      PrintFormat("[GoldEA] Error: Invalid parameters. TickValue: %f, TickSize: %f", tickValue, tickSize);
+      Log(StringFormat("Error: Invalid parameters. TickValue: %f, TickSize: %f", tickValue, tickSize));
       return SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) > 0 ? SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) : 0.01;
      }
 
    double moneyPerLot = (stopDistance / tickSize) * tickValue;
    if(moneyPerLot <= 0.0)
      {
-      Print("[GoldEA] Error: Calculated loss per lot is zero or negative.");
+      Log("Error: Calculated loss per lot is zero or negative.");
       return SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) > 0 ? SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN) : 0.01;
      }
 
    double rawLot = riskAmount / moneyPerLot;
    double finalLot = NormalizeVolume(rawLot);
    
-   PrintFormat("[GoldEA] Lot Calc: Bal=%.2f, Risk=%.2f, StopDist=%.1f, LossPerLot=%.2f, RawLot=%.5f, FinalLot=%.2f",
-               AccountInfoDouble(ACCOUNT_BALANCE), riskAmount, stopDistance, moneyPerLot, rawLot, finalLot);
+   Log(StringFormat("Lot Calc: Bal=%.2f, Risk=%.2f, StopDist=%.1f, LossPerLot=%.2f, RawLot=%.5f, FinalLot=%.2f",
+               AccountInfoDouble(ACCOUNT_BALANCE), riskAmount, stopDistance, moneyPerLot, rawLot, finalLot));
                
    return finalLot;
   }

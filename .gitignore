@@ -19,3 +19,6 @@
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Generated analysis files
+/log_analysis_output/

@@ -1,6 +1,22 @@
 #ifndef XAUUSD_ADAPTIVE_MANAGEMENT_MQH
 #define XAUUSD_ADAPTIVE_MANAGEMENT_MQH
 
+//=============================================================================
+// CHANGELOG
+// Version 2.1 (EA Log Tagging)
+// * Added EA_TYPE input to uniquely identify M1 vs M5 EA instances.
+// * Implemented Log() wrapper function for unified console output.
+// * Replaced all Print(), PrintFormat(), and DebugPrint() calls with Log().
+// * Structured TRADE_RESULT logs to include ticket and profit= values for parsing.
+//=============================================================================
+
+// Note: EA_TYPE must now be defined in the main .mq5 files before #include
+
+void Log(string message)
+{
+   Print("[" + EA_TYPE + "][GoldEA] " + message);
+}
+
 int CountPositions(const ENUM_POSITION_TYPE positionType)
   {
    int count = 0;
@@ -76,7 +92,7 @@ bool ExecuteTrade(const DecisionContext &context)
    if(HasOpenPosition())
      {
       int totalCount = CountPositions(POSITION_TYPE_BUY) + CountPositions(POSITION_TYPE_SELL);
-      DebugPrint(StringFormat("Trade blocked: existing position already open. Current count: %d", totalCount));
+      Log(StringFormat("[TRADE][BLOCK] Trade blocked: existing position already open. Current count: %d", totalCount));
       LogToCSV("TRADE_BLOCKED",context.sessionName,context.strategyName,context.price,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"MAX_GLOBAL_POSITIONS");
       return false;
      }
@@ -88,7 +104,7 @@ bool ExecuteTrade(const DecisionContext &context)
    double lot = CalculateLotSize(riskDistance, context.riskPercent);
    if(lot <= 0.0)
      {
-      DebugPrint("Trade skipped because lot calculation returned 0 (Invalid parameters).");
+      Log("[TRADE][SKIP] Trade skipped because lot calculation returned 0 (Invalid parameters).");
       LogToCSV("TRADE_SKIPPED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"LOT_SIZE_ZERO");
       return false;
      }
@@ -106,8 +122,8 @@ bool ExecuteTrade(const DecisionContext &context)
       double maxSLTicks = maxRiskUSD / (tickValue * lot);
       double adjustedSLDistance = maxSLTicks * tickSize;
 
-      DebugPrint(StringFormat("SL adjusted to fit %g%% risk. Expected $%.2f > Max $%.2f. Shrinking SL %.2f -> %.2f points.",
-                              InpMaxAbsoluteRiskPercent, expectedLoss, maxRiskUSD, riskDistance / _Point, adjustedSLDistance / _Point));
+      Log(StringFormat("[TRADE][MGMT] SL adjusted to fit %g%% risk. Expected $%.2f > Max $%.2f. Shrinking SL %.2f -> %.2f points.",
+                       InpMaxAbsoluteRiskPercent, expectedLoss, maxRiskUSD, riskDistance / _Point, adjustedSLDistance / _Point));
       LogToCSV("SL_ADJUSTED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,StringFormat("OrigSL_%.2f_NewSL_%.2f", riskDistance, adjustedSLDistance));
 
       riskDistance = adjustedSLDistance;
@@ -145,7 +161,7 @@ bool ExecuteTrade(const DecisionContext &context)
    if(!success)
      {
       string failReason = StringFormat("ORDER_FAILED_%d_%s",trade.ResultRetcode(),trade.ResultRetcodeDescription());
-      DebugPrint(StringFormat("%s order failed: %s",context.decision,failReason));
+      Log(StringFormat("[TRADE][ERROR] %s order failed: %s",context.decision,failReason));
       LogToCSV(context.decision + "_FAILED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,failReason);
       return false;
      }
@@ -176,7 +192,7 @@ bool ExecuteTrade(const DecisionContext &context)
    g_lastTradeTime = TimeTradeServer();
 
    DrawTradeArrow(tradeId, context.type, context.isCounterTrend, entryPrice);
-   DebugPrint(StringFormat("%s executed: tradeId=%I64u lot=%.2f entry=%.2f sl=%.2f tp=%.2f",context.decision,tradeId,lot,entryPrice,sl,tp));
+   Log(StringFormat("%s executed: tradeId=%I64u lot=%.2f entry=%.2f sl=%.2f tp=%.2f",context.decision,tradeId,lot,entryPrice,sl,tp));
    LogToCSV(context.decision + "_EXECUTED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,StringFormat("TRADE_ID_%I64u",tradeId));
 
    if(InpEnablePushAlerts || InpEnableEmailAlerts)
@@ -266,7 +282,7 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
                {
                    GlobalVariableSet(trailLevelKey, desiredTrailLevel);
                    string logReason = StringFormat("PROFIT_%.2fR_SL_TO_+%.2fR", rMultiple, newSL_R);
-                   PrintFormat("M5 TRAIL UPDATE: Profit reached %.2fR. Moving SL to +%.2fR (New SL: %.2f, Level: %d)", rMultiple, newSL_R, newSlPrice, desiredTrailLevel);
+                   Log(StringFormat("[MGMT][TRAIL] M5 R-Multiple Profit reached %.2fR. Moving SL to +%.2fR (New SL: %.2f, Level: %d)", rMultiple, newSL_R, newSlPrice, desiredTrailLevel));
                    LogToCSV("M5_R_TRAIL_UPDATE", SessionToString(snapshot.session), "TRADE_MGMT", priceNow, snapshot.rsi, snapshot.fastEma, snapshot.slowEma, snapshot.atr, snapshot.spread, desiredTrailLevel, PositionTypeText(type), logReason);
                }
            }
@@ -311,7 +327,7 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
                if(trade.PositionModify(ticket,newSl,currentTp))
                  {
                   GlobalVariableSet(accLockKey,1.0);
-                  DebugPrint(StringFormat("Account profit lock moved for ticket=%I64u",ticket));
+                  Log(StringFormat("[MGMT][LOCK] Account profit lock moved for ticket=%I64u",ticket));
                   string reasonStr = StringFormat("PROFIT_$%.2f_SL_%.2f", profitMoney, newSl);
                   LogToCSV("ACCOUNT_PROFIT_LOCK",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),reasonStr);
                  }
@@ -348,7 +364,7 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
          if(trade.PositionModify(ticket,newSl,currentTp))
            {
             GlobalVariableSet(lockKey,1.0);
-            DebugPrint(StringFormat("Minimal profit lock moved for ticket=%I64u",ticket));
+                  Log(StringFormat("[MGMT][LOCK] Minimal profit lock moved for ticket=%I64u",ticket));
             string reasonStr = StringFormat("PROFIT_%.2f_SL_%.2f", profitDistance, newSl);
             LogToCSV("MIN_PROFIT_LOCK_TRIGGERED",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),reasonStr);
            }
@@ -369,7 +385,7 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
          if(trade.PositionClosePartial(ticket,halfVolume))
            {
             GlobalVariableSet(partialKey,1.0);
-            DebugPrint(StringFormat("Partial close completed for ticket=%I64u",ticket));
+               Log(StringFormat("PARTIAL CLOSE completed ticket=%I64u",ticket));
             LogToCSV("PARTIAL_CLOSE",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),"PARTIAL_50_AT_1_5R");
            }
         }
@@ -420,7 +436,7 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
         {
          if(trade.PositionModify(ticket,trailedSl,currentTp))
            {
-            DebugPrint(StringFormat("Trailing stop updated for ticket=%I64u",ticket));
+               Log(StringFormat("Trailing stop updated ticket=%I64u",ticket));
             LogToCSV("TRAILING_UPDATED",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),"TRAILING_STOP_MOVED");
            }
         }
@@ -632,12 +648,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
                     + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
                     + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
 
+   ulong posId = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+
    if(netProfit < 0.0)
-      Print(StringFormat("TRADE_RESULT: LOSS (Profit: %.2f)", netProfit));
+      Log(StringFormat("STOP LOSS HIT ticket=%I64u profit=%.2f", posId, netProfit));
    else if(netProfit > 0.0)
-      Print(StringFormat("TRADE_RESULT: WIN (Profit: %.2f)", netProfit));
+      Log(StringFormat("TAKE PROFIT HIT ticket=%I64u profit=%.2f", posId, netProfit));
    else
-      Print(StringFormat("TRADE_RESULT: BREAKEVEN (Profit: %.2f)", netProfit));
+      Log(StringFormat("BREAKEVEN ticket=%I64u profit=%.2f", posId, netProfit));
   }
 
 #endif // XAUUSD_ADAPTIVE_MANAGEMENT_MQH

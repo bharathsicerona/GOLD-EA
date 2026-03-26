@@ -5,6 +5,13 @@
 #include <Trade/Trade.mqh>
 #include <Generic/HashMap.mqh>
 
+string EA_TYPE = "M1_SCALPER";
+
+void Log(string message)
+{
+   Print("[" + EA_TYPE + "][GoldEA] " + message);
+}
+
 // --- Global Variables & Objects ---
 CTrade trade;
 int    g_symbolDigits = 2;
@@ -20,10 +27,10 @@ int g_atrHandle   = INVALID_HANDLE;
 
 // Include all modular components
 #include "XAUUSD_M1_Scalper_Inputs.mqh"
-#include "GoldEA_Common_Core.mqh"
+#include "../Include/GoldEA_Common_Core.mqh"
 #include "XAUUSD_M1_Scalper_Indicators.mqh"
 #include "XAUUSD_M1_Scalper_Entry.mqh"
-#include "GoldEA_Unified_Risk.mqh" // <-- NEW UNIFIED RISK ENGINE
+#include "../Include/GoldEA_Unified_Risk.mqh" // <-- NEW UNIFIED RISK ENGINE
 // #include "XAUUSD_M1_Scalper_Logging.mqh" // Commented out to fix compile errors
 #include "XAUUSD_M1_Scalper_HighRisk_Management.mqh"
 
@@ -78,7 +85,7 @@ void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction)
     double entryPrice = (direction == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double atrValue;
     if (!GetIndicatorValue(g_atrHandle, 1, atrValue)) {
-        DebugPrint("Could not get ATR for trade execution.");
+        Log("Could not get ATR for trade execution.");
         return;
     }
 
@@ -94,7 +101,7 @@ void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction)
     // This function will adjust lotSize and slPrice by reference to meet risk rules.
     if (!CalculateTradeRisk((direction == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, entryPrice, lotSize, slPrice))
     {
-        DebugPrint("Trade aborted by Unified Risk Engine. Check logs for details.");
+        Log("Trade aborted by Unified Risk Engine. Check logs for details.");
         return; // Risk engine determined the trade is not viable.
     }
     
@@ -111,7 +118,7 @@ void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction)
 
     // --- 5. Margin Check ---
     if (!HasSufficientMargin(direction, lotSize, entryPrice)) {
-        DebugPrint("Trade skipped due to insufficient margin for risk-adjusted lot.");
+        Log("Trade skipped due to insufficient margin for risk-adjusted lot.");
         return;
     }
 
@@ -128,20 +135,20 @@ void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction)
     
     if (trade.PositionOpen(_Symbol, orderType, lotSize, entryPrice, slPrice, tpPrice)) {
         ulong ticket = trade.ResultDeal();
-        DebugPrint(StringFormat("TRADE EXECUTED: %s %.2f lots @ %.2f, SL=%.2f, TP=%.f", 
+        Log(StringFormat("TRADE EXECUTED: %s %.2f lots @ %.2f, SL=%.2f, TP=%.f", 
             (direction == POSITION_TYPE_BUY ? "BUY" : "SELL"), lotSize, entryPrice, slPrice, tpPrice));
 
         // --- 8. Store Initial Risk ---
         if (ticket > 0) {
             if (!g_initialRiskMap.ContainsKey(ticket)) {
                 g_initialRiskMap.Add(ticket, initialRiskInCurrency);
-                DebugPrint(StringFormat("Initial risk for ticket #%I64u stored: $%.2f", ticket, initialRiskInCurrency));
+                Log(StringFormat("Initial risk for ticket #%I64u stored: $%.2f", ticket, initialRiskInCurrency));
             }
             // Record the bar time of the successful entry to prevent same-candle re-entries
             g_lastTradeBarTime = iTime(_Symbol, PERIOD_M1, 0);
         }
     } else {
-        DebugPrint(StringFormat("Trade execution failed: %s", trade.ResultComment()));
+        Log(StringFormat("Trade execution failed: %s", trade.ResultComment()));
     }
 }
 
@@ -172,7 +179,7 @@ void ExtendTakeProfit(ulong ticket, double initialRisk)
         
         if (newTP != 0) {
             trade.PositionModify(ticket, PositionGetDouble(POSITION_SL), newTP);
-            DebugPrint("Runner detected: TP dynamically extended to prevent premature exit.");
+            Log("Runner detected: TP dynamically extended to prevent premature exit.");
         }
     }
 }
@@ -190,7 +197,7 @@ int OnInit()
     // Init trade engine
     trade.SetTypeFillingBySymbol(_Symbol);
 
-    DebugPrint("High-Risk M1 EA v2.1 Initialized.");
+    Log("High-Risk M1 EA v2.1 Initialized.");
     return INIT_SUCCEEDED;
 }
 
@@ -201,7 +208,7 @@ void OnDeinit(const int reason)
 {
     ReleaseIndicators();
     // g_initialRiskMap is destroyed automatically
-    DebugPrint("High-Risk M1 EA Deinitialized.");
+    Log("High-Risk M1 EA Deinitialized.");
 }
 
 //+------------------------------------------------------------------+
@@ -217,7 +224,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
                     ulong position_id = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
                     if (g_initialRiskMap.ContainsKey(position_id)) {
                         g_initialRiskMap.Remove(position_id);
-                        DebugPrint(StringFormat("Initial risk for closed ticket #%I64u removed.", position_id));
+                        Log(StringFormat("Initial risk for closed ticket #%I64u removed.", position_id));
                     }
                     // Cooldown after loss
                     if(HistoryDealGetDouble(trans.deal, DEAL_PROFIT) < 0) {
@@ -294,14 +301,14 @@ void OnTick()
     // Check for BUY signal
     EntryContext buyContext = ValidateEntry(POSITION_TYPE_BUY);
     if (buyContext.isValid) {
-        DebugPrint("VALID BUY SIGNAL: " + buyContext.reason);
+        Log("VALID BUY SIGNAL: " + buyContext.reason);
         ExecuteHighRiskTrade(POSITION_TYPE_BUY);
         return;
     } else {
         static datetime lastBuyRejectTime = 0;
         datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
         if (lastBuyRejectTime != currentBarTime) {
-            DebugPrint("BUY REJECTED: " + buyContext.reason);
+            Log("BUY REJECTED: " + buyContext.reason);
             lastBuyRejectTime = currentBarTime;
         }
     }
@@ -309,14 +316,14 @@ void OnTick()
     // Check for SELL signal
     EntryContext sellContext = ValidateEntry(POSITION_TYPE_SELL);
     if (sellContext.isValid) {
-        DebugPrint("VALID SELL SIGNAL: " + sellContext.reason);
+        Log("VALID SELL SIGNAL: " + sellContext.reason);
         ExecuteHighRiskTrade(POSITION_TYPE_SELL);
         return;
     } else {
         static datetime lastSellRejectTime = 0;
         datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
         if (lastSellRejectTime != currentBarTime) {
-            DebugPrint("SELL REJECTED: " + sellContext.reason);
+            Log("SELL REJECTED: " + sellContext.reason);
             lastSellRejectTime = currentBarTime;
         }
     }
@@ -329,22 +336,22 @@ bool InitializeIndicators()
 {
     g_ema20Handle = iMA(_Symbol, _Period, InpFastEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
     if(g_ema20Handle == INVALID_HANDLE) {
-        Print("Error creating Fast EMA indicator.");
+        Log("Error creating Fast EMA indicator.");
         return false;
     }
     g_ema50Handle = iMA(_Symbol, _Period, InpSlowEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
     if(g_ema50Handle == INVALID_HANDLE) {
-        Print("Error creating Slow EMA indicator.");
+        Log("Error creating Slow EMA indicator.");
         return false;
     }
     g_rsiHandle = iRSI(_Symbol, _Period, InpRsiPeriod, PRICE_CLOSE);
     if(g_rsiHandle == INVALID_HANDLE) {
-        Print("Error creating RSI indicator.");
+        Log("Error creating RSI indicator.");
         return false;
     }
     g_atrHandle = iATR(_Symbol, _Period, InpAtrPeriod);
     if(g_atrHandle == INVALID_HANDLE) {
-        Print("Error creating ATR indicator.");
+        Log("Error creating ATR indicator.");
         return false;
     }
     return true;

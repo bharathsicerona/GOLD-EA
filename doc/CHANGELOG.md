@@ -3,6 +3,18 @@
 This document summarizes the major changes, bug fixes, and strategic overhauls made to the Expert Advisors in this project.
 
 ---
+## Unified Logging System - Version 1.0
+
+*   **[REFACTOR] Standardized Logging System:** Implemented a new, unified logging system across both the M1 Scalper and M5 Adaptive EAs to ensure all log outputs are clearly identifiable and consistently formatted.
+*   **[FEATURE] Added `EA_TYPE` Identifier:**
+    *   Introduced a global `EA_TYPE` variable in each main EA file.
+    *   Set to `"M1_SCALPER"` for the M1 EA.
+    *   Set to `"M5"` for the M5 EA.
+*   **[FEATURE] Created `Log()` Wrapper Function:** A new `Log(string message)` function was created to automatically prepend every log message with the `[EA_TYPE][GoldEA]` prefix, providing a standardized output format.
+*   **[REFACTOR] Replaced All `Print` Statements:** All instances of `Print()`, `PrintFormat()`, and the custom `DebugPrint()` across all relevant EA and management files were replaced with the new `Log()` function.
+*   **[DOCS] Added Logging Refactor Documentation:** Created a new document `doc/LOGGING_REFACTOR.md` to explain the changes, rationale, and provide before/after examples of the log outputs.
+
+---
 
 ## M5 Adaptive EA - Version 4.30 (R-Multiple Trailing Stop)
 
