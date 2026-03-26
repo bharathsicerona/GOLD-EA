@@ -382,26 +382,6 @@ def parse_result_line(line: str, source_file: Path, ea_type: str, timestamp: str
     )
 
 
-def parse_log_file(path: Path) -> list[Event]:
-    events: list[Event] = []
-    text = read_text_auto(path)
-    current_ea = classify_ea_line(path.name, path)
-    for line in text.splitlines():
-        line_ea = classify_ea_line(line, path, current_ea)
-        if line_ea != "UNKNOWN":
-            current_ea = line_ea
-        if "[GoldEA]" not in line:
-            continue
-        event = (
-            parse_check_line(line, path, current_ea)
-            or parse_execution_line(line, path, current_ea)
-            or parse_result_line(line, path, current_ea)
-        )
-        if event:
-            events.append(event)
-    return events
-
-
 def read_text_auto(path: Path) -> str:
     raw = path.read_bytes()
     if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):

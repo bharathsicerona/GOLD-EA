@@ -1,6 +1,20 @@
 #ifndef XAUUSD_M1_SCALPER_LOGGING_MQH
 #define XAUUSD_M1_SCALPER_LOGGING_MQH
 
+// --- Struct for passing decision context to dashboard and loggers ---
+struct DecisionContext
+{
+    string sessionName;
+    string status;
+    string strategyName;
+    double riskPercent;
+    double atr;
+    int    score;
+    string decision;
+    string phase;
+    string reason;
+};
+
 string g_dashboardPrefix = "M1_Dash_";
 string g_m1LogPattern = "GoldEA_M1_Log_*.csv";
 

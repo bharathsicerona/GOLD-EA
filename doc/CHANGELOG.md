@@ -3,6 +3,14 @@
 This document summarizes the major changes, bug fixes, and strategic overhauls made to the Expert Advisors in this project.
 
 ---
+## Dashboard & UI Enhancements - Version 4.4
+
+*   **[FEATURE] Added Dashboard to M1 Scalper EA:** Implemented a new dashboard for the M1 Scalper EA, reusing the existing dashboard code from the M5 Adaptive EA. This provides a consistent user interface across both EAs.
+*   **[FEATURE] Standardized Dashboard Titles:** The dashboard titles for both EAs have been updated to be dynamic and clearly identify the running EA. The new titles are "GOLD EA M1 Dashboard" and "GOLD EA M5 Dashboard".
+*   **[ENHANCEMENT] Consistent UI:** Ensured that the layout, UI behavior, and overall look and feel of the dashboards are consistent for both EAs.
+*   **[REFACTOR] Modular Dashboard Code:** The dashboard logic for the M1 EA has been encapsulated in `XAUUSD_M1_Scalper_Logging.mqh` and `XAUUSD_M1_Scalper_Management.mqh` to mirror the structure of the M5 EA.
+
+---
 ## Unified Logging System - Version 1.0
 
 *   **[REFACTOR] Standardized Logging System:** Implemented a new, unified logging system across both the M1 Scalper and M5 Adaptive EAs to ensure all log outputs are clearly identifiable and consistently formatted.

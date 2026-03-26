@@ -64,6 +64,8 @@ input int              InpNewYorkEndHour         = 22;
 
 input bool             InpEnableDebugPrints      = true;
 input bool             InpEnableCSVLogging       = true;
+input bool             InpEnableDashboard        = true;    // Enable the on-chart dashboard
+input int              InpMinimumScore           = 7;       // Minimum score to highlight on dashboard
 
 #property group "" // Reset group
 

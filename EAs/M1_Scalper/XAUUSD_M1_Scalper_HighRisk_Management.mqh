@@ -34,8 +34,8 @@ void ManageTrailingStop(const ulong ticket, const double profit)
     }
     else if (profit >= 1.0)
     {
-        // Special case: At $1 profit, lock $0.2.
-        targetLockedProfit = 0.2;
+        // Special case: At $1 profit, lock $0.5.
+        targetLockedProfit = 0.5;
     }
 
     if (targetLockedProfit <= 0.0) return; // No action needed yet

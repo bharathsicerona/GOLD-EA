@@ -5,7 +5,7 @@
 #include <Trade/Trade.mqh>
 #include <Generic/HashMap.mqh>
 
-string EA_TYPE = "M1_SCALPER";
+string EA_TYPE = "M1";
 
 void Log(string message)
 {
@@ -31,7 +31,7 @@ int g_atrHandle   = INVALID_HANDLE;
 #include "XAUUSD_M1_Scalper_Indicators.mqh"
 #include "XAUUSD_M1_Scalper_Entry.mqh"
 #include "../Include/GoldEA_Unified_Risk.mqh" // <-- NEW UNIFIED RISK ENGINE
-// #include "XAUUSD_M1_Scalper_Logging.mqh" // Commented out to fix compile errors
+#include "XAUUSD_M1_Scalper_Logging.mqh"
 #include "XAUUSD_M1_Scalper_HighRisk_Management.mqh"
 
 // Custom hash map to store initial risk per ticket
@@ -185,6 +185,33 @@ void ExtendTakeProfit(ulong ticket, double initialRisk)
 }
 
 //+------------------------------------------------------------------+
+//| EvaluateTickAndDashboard - Update the dashboard on every tick    |
+//+------------------------------------------------------------------+
+void EvaluateTickAndDashboard()
+{
+    if (!InpEnableDashboard) return;
+
+    DecisionContext context;
+    context.sessionName = "AGGRO"; // M1 is always AGGRO
+    context.status = IsCooldownActive() ? "COOLDOWN" : "ACTIVE";
+    context.strategyName = "M1 Scalper";
+    context.riskPercent = InpHighRiskPercent; // Using the high-risk input
+
+    double atrValue;
+    if (GetIndicatorValue(g_atrHandle, 1, atrValue)) {
+        context.atr = atrValue;
+    }
+
+    context.score = 0; // M1 EA doesn't have a score model
+    context.decision = "MONITORING";
+    context.phase = "N/A";
+    context.reason = "N/A";
+
+    // This function is defined in the logging include
+    UpdateDashboard(context);
+}
+
+//+------------------------------------------------------------------+
 //| OnInit: EA Initialization                                        |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -209,6 +236,13 @@ void OnDeinit(const int reason)
     ReleaseIndicators();
     // g_initialRiskMap is destroyed automatically
     Log("High-Risk M1 EA Deinitialized.");
+
+   if(InpEnableDashboard)
+     {
+      string labels[7] = {"Title","Session","Strategy","ATR","Score","Decision","Reason"};
+      for(int i = 0; i < 7; ++i)
+         ObjectDelete(0,g_dashboardPrefix + labels[i]);
+     }
 }
 
 //+------------------------------------------------------------------+
@@ -243,6 +277,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 //+------------------------------------------------------------------+
 void OnTick()
 {
+    EvaluateTickAndDashboard();
     // --- 1. Manage Existing Position ---
     if (HasOpenPosition())
     {

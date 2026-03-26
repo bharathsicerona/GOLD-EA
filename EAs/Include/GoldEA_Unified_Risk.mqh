@@ -149,16 +149,17 @@ bool CalculateTradeRisk(
     double riskPerLot = (slDistancePrice / tickSize) * tickValue;
     double calculatedLot = riskAmount / riskPerLot;
 
-    // Normalize the lot and update the reference
-    lotSize = NormalizeLot(calculatedLot);
-
-    // If calculated lot is less than min lot, use min lot and re-run logic.
-    if (lotSize < minLot)
+    // If the dynamically calculated lot is too small, fallback to the min lot
+    // and re-run the logic, which will correctly apply the fixed $10 cap.
+    if (calculatedLot < minLot)
     {
        lotSize = minLot;
-       // We call the function again to apply the fixed $10 rule correctly
+       // This recursive call ensures the 'Fixed $10 cap' rule is applied.
        return CalculateTradeRisk(orderType, openPrice, lotSize, stopLoss);
     }
+
+    // Otherwise, proceed with the dynamically calculated lot size.
+    lotSize = NormalizeLot(calculatedLot);
 
     double finalRiskInMoney = (slDistancePrice / tickSize) * tickValue * lotSize;
     PrintFormat("RISK LOG: Rule '1%% dynamic risk' applied. Account Balance: $%.2f, Risk Target: $%.2f. Calculated Lot: %.2f, SL: %.2f, Final Risk: $%.2f", 
