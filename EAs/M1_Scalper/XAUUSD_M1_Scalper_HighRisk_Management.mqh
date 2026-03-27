@@ -24,54 +24,10 @@ double ProfitToPrice(const double profitInCurrency, const string symbol, const d
 // It moves the SL to predefined profit levels as the trade becomes more profitable.
 void ManageTrailingStop(const ulong ticket, const double profit)
 {
-    // --- Determine Target Locked Profit ---
-    double targetLockedProfit = 0.0;
-    if (profit >= 2.0)
-    {
-        // For profits >= $2, lock the profit minus $1.
-        // Example: at $5.50 profit, lock $4.00.
-        targetLockedProfit = floor(profit) - 1.0;
-    }
-    else if (profit >= 1.0)
-    {
-        // Special case: At $1 profit, lock $0.5.
-        targetLockedProfit = 0.5;
-    }
-
-    if (targetLockedProfit <= 0.0) return; // No action needed yet
-
-    // --- Calculate and Apply New Stop Loss ---
-    if (!PositionSelectByTicket(ticket)) return;
-
-    ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-    double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-    double currentSL = PositionGetDouble(POSITION_SL);
-    double currentTP = PositionGetDouble(POSITION_TP);
-    double volume = PositionGetDouble(POSITION_VOLUME);
-    string symbol = PositionGetString(POSITION_SYMBOL);
-
-    double profitPoints = ProfitToPrice(targetLockedProfit, symbol, volume, type);
-    if (profitPoints <= 0.0) return;
-
-    double newSL = 0.0;
-    if (type == POSITION_TYPE_BUY)
-    {
-        newSL = NormalizeDouble(openPrice + profitPoints, SYMBOL_POINT);
-        // Ensure new SL is higher than current SL
-        if (newSL <= currentSL) return;
-    }
-    else // SELL
-    {
-        newSL = NormalizeDouble(openPrice - profitPoints, SYMBOL_POINT);
-        // Ensure new SL is lower than current SL (and not zero)
-        if (currentSL != 0 && newSL >= currentSL) return;
-    }
-    
-    // --- Modify Position and Log ---
-    if (trade.PositionModify(ticket, newSL, currentTP))
-    {
-        Log(StringFormat("PROFIT LOCK: Ticket #%I64u SL moved. Profit reached $%.2f, locking $%.2f.", ticket, profit, targetLockedProfit));
-    }
+    // Fixed-SL mode: stop-loss is set at entry and must not be modified later.
+    // Keep function as no-op to preserve execution flow without SL overrides.
+    if(ticket == 0 && profit < 0.0)
+        Log("ManageTrailingStop no-op.");
 }
 
 
