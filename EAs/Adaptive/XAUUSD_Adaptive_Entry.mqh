@@ -59,11 +59,6 @@ DecisionContext RunTrendPullbackStrategy(const ENUM_POSITION_TYPE direction,cons
    ctx.isCounterTrend = false;
    ctx.riskPercent = InpRiskPercent;
 
-   if(snapshot.session != SESSION_ASIAN)
-     {
-      ctx.reason = "SESSION_BLOCK";
-      return ctx;
-     }
    if(!snapshot.spreadOk)
      {
       ctx.reason = "SPREAD_TOO_HIGH";
@@ -148,6 +143,7 @@ DecisionContext RunTrendPullbackStrategy(const ENUM_POSITION_TYPE direction,cons
 DecisionContext SelectAndRunStrategy(const ENUM_POSITION_TYPE direction,const IndicatorSnapshot &snapshot,const bool isBarClose = false)
   {
    DecisionContext ctx = RunTrendPullbackStrategy(direction, snapshot, isBarClose);
+
    if(isBarClose)
       DebugPrint(StringFormat("[%s] %s check: price=%.2f atr=%.2f score=%d reason=%s",
                               ctx.strategyName, PositionTypeText(direction), ctx.price, ctx.atr, ctx.score, ctx.reason));

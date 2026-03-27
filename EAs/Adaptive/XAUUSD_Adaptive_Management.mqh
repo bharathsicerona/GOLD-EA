@@ -335,9 +335,7 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
        int desiredTrailLevel = currentTrailLevel;
 
        // Determine the highest trail level the trade currently qualifies for
-       if (rMultiple >= 2.5)      desiredTrailLevel = 4;
-       else if (rMultiple >= 2.0) desiredTrailLevel = 3;
-       else if (rMultiple >= 1.5) desiredTrailLevel = 2;
+       if (rMultiple >= 2.0) desiredTrailLevel = 2;
        else if (rMultiple >= 1.0) desiredTrailLevel = 1;
 
        // If the trade qualifies for a higher level than it's currently on
@@ -345,10 +343,8 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
        {
            double newSL_R = 0.0;
            // Get the target SL in R-terms based on the desired level
-           if (desiredTrailLevel == 1) newSL_R = 0.1; // At 1.0R profit, move SL to +0.1R
-           if (desiredTrailLevel == 2) newSL_R = 0.5; // At 1.5R profit, move SL to +0.5R
-           if (desiredTrailLevel == 3) newSL_R = 1.0; // At 2.0R profit, move SL to +1.0R
-           if (desiredTrailLevel == 4) newSL_R = 1.5; // At 2.5R profit, move SL to +1.5R
+           if (desiredTrailLevel == 1) newSL_R = 0.2; // At 1.0R profit, move SL to +0.2R
+           if (desiredTrailLevel == 2) newSL_R = 1.0; // At 2.0R profit, move SL to +1.0R
 
            double newSlPrice = 0.0;
            if (type == POSITION_TYPE_BUY)
@@ -459,23 +455,7 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
         }
      }
 
-   string partialKey = BuildStateKey("partial",ticket);
-   if(rMultiple >= 1.5 && (!GlobalVariableCheck(partialKey) || GlobalVariableGet(partialKey) < 1.0))
-     {
-      double halfVolume = NormalizeVolume(volume * 0.5);
-      double minLot     = SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN);
-      if(halfVolume >= minLot && halfVolume < volume)
-        {
-         if(trade.PositionClosePartial(ticket,halfVolume))
-           {
-            GlobalVariableSet(partialKey,1.0);
-               Log(StringFormat("PARTIAL CLOSE completed ticket=%I64u",ticket));
-            LogToCSV("PARTIAL_CLOSE",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),"PARTIAL_50_AT_1_5R");
-           }
-        }
-      else
-         GlobalVariableSet(partialKey,1.0);
-     }
+
 
    if(allowStopLossUpdates && !isTrailActive && (profitDistance >= snapshot.atr * InpTrailActivationAtrMultiplier || (GlobalVariableCheck(accLockKey) && GlobalVariableGet(accLockKey) >= 1.0)))
      {

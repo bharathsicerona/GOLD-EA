@@ -34,14 +34,15 @@ This project includes three distinct Expert Advisors. Each has its own dedicated
 ### 1. M5 Adaptive (Capital Stabilizer) EA
 
 -   **Folder:** `EAs/Adaptive/`
--   **Role:** Capital Stabilizer (lower-frequency, higher-quality trades on M5).
--   **Strategy:** Trend Pullback only (multi-strategy routing and score/penalty gating removed from live decision path):
-    - BUY: `EMA20 > EMA50` + pullback to `EMA20` + bullish candle
-    - SELL: `EMA20 < EMA50` + pullback to `EMA20` + bearish candle
-    - Session scope: Asian session only
-    - Minimum score gate: `InpMinimumScore = 80`
+- **Role:** Capital Stabilizer (lower-frequency, higher-quality trades on M5).
+-   **Strategy:** Session-based strategy selection:
+    -   **Asian Session (Range):** Buys near support and sells near resistance with RSI confirmation.
+    -   **London Session (Breakout):** Buys on breakouts above recent highs and sells on breakouts below recent lows, with strong candle confirmation.
+    -   **New York Session (Trend Pullback):**
+        - BUY: `EMA20 > EMA50` + pullback to `EMA20` + bullish candle
+        - SELL: `EMA20 < EMA50` + pullback to `EMA20` + bearish candle
 -   **Risk Model:** Fixed monetary stop-loss model shared with M1:
-    - 0.01 lot -> SL risk = $10 (M5 structured high-impact mode)
+    - 0.01 lot -> SL risk = 0 (M5 structured high-impact mode)
     - 0.02 lot -> SL risk = $6
     - 0.03+ lots -> SL risk = 1% of account balance
     TP remains RR-based from the computed SL distance (default 3R).

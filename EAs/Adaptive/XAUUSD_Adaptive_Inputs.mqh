@@ -79,6 +79,12 @@ input int              InpLondonEndHour          = 13;
 input int              InpNewYorkStartHour       = 13;
 input int              InpNewYorkEndHour         = 22;
 
+//--- Session Strategies
+input double           InpRangeProximityFactor   = 0.5;  // ATR multiplier for Asian range proximity
+input double           InpRangeRsiBuyMax         = 40.0; // Max RSI for Asian range buy
+input double           InpRangeRsiSellMin        = 60.0; // Min RSI for Asian range sell
+input double           InpBreakoutCandleFactor   = 0.7;  // ATR multiplier for London breakout candle size
+
 input ENUM_SCORE_MODE  InpUseScoring             = SCORE_ENABLED;
 input int              InpMinimumScore           = 80;
 input int              InpWeightTrend            = 30;

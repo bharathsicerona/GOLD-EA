@@ -3,6 +3,14 @@
 This document summarizes the major changes, bug fixes, and strategic overhauls made to the Expert Advisors in this project.
 
 ---
+## M1 Scalper EA - Version 3.1 (Entry Logic Tuning)
+
+*   **[ENHANCEMENT] Dynamic EMA Gap Filter:** The trend strength filter, which checks the gap between the fast and slow EMAs, was updated. It now uses a dynamic, ATR-based threshold (`ATR * 0.6`) instead of a fixed point value. This allows the filter to adapt to changing market volatility, requiring a wider EMA separation in volatile markets and a smaller one in quiet markets.
+*   **[ENHANCEMENT] Hybrid Pullback Logic:** The condition for identifying a pullback to the EMA20 has been significantly improved. The new hybrid logic now validates a pullback if either the price is within a certain ATR-based distance (`ATR * 0.4`) of the EMA, OR if the candle body explicitly crosses over the EMA, providing a much more reliable entry signal.
+*   **[FEATURE] Minimum Volatility Filter:** A new hard filter was added to prevent the EA from trading in extremely flat or non-volatile market conditions. Trades are now rejected if the current ATR value is below a minimum threshold (e.g., 1.0 for XAUUSD). This helps avoid low-probability "chop" entries.
+*   **[DOCS] Updated Entry Logic Documentation:** The header comments in `XAUUSD_M1_Scalper_Entry.mqh` have been updated to reflect the new, more sophisticated entry conditions.
+
+---
 ## Dashboard & UI Enhancements - Version 4.4
 
 *   **[FEATURE] Added Dashboard to M1 Scalper EA:** Implemented a new dashboard for the M1 Scalper EA, reusing the existing dashboard code from the M5 Adaptive EA. This provides a consistent user interface across both EAs.

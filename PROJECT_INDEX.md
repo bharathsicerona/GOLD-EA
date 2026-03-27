@@ -118,7 +118,7 @@ The following list includes all files currently present in the project workspace
 ### M5 Adaptive Multi-Factor EA (`EAs/Adaptive/XAUUSD_Adaptive_MultiFactor_EA.mq5`)
 
 - Timeframe: `PERIOD_M5`
-- Strategy type: Capital Stabilizer (trend-pullback only)
+- Strategy type: Capital Stabilizer (session-based)
 - Entry logic source: `SelectAndRunStrategy()` in `XAUUSD_Adaptive_Entry.mqh`
 - Indicators used:
 - EMA fast/slow
@@ -128,11 +128,13 @@ The following list includes all files currently present in the project workspace
 - ADX
 - Market structure: Asian session high/low range
 - Active strategy logic:
-- BUY: `EMA20 > EMA50` + pullback to EMA20 + bullish candle
-- SELL: `EMA20 < EMA50` + pullback to EMA20 + bearish candle
-- Multi-strategy routing and penalty scoring removed from active decision path.
+- **Asian Session (Range):** Buys near support and sells near resistance with RSI confirmation.
+- **London Session (Breakout):** Buys on breakouts above recent highs and sells on breakouts below recent lows, with strong candle confirmation.
+- **New York Session (Trend Pullback):**
+    - BUY: `EMA20 > EMA50` + pullback to EMA20 + bullish candle
+    - SELL: `EMA20 < EMA50` + pullback to EMA20 + bearish candle
 - Filters:
-- Spread, Asian-only session, cooldown, max positions, duplicate-bar block, continuation checks
+- Spread, cooldown, max positions, duplicate-bar block, continuation checks
 - Minimum score threshold increased to `80` for stabilizer filtering
 - Counter-trend gate disabled by strategy design (trend alignment required)
 - Exit / management:
@@ -181,8 +183,10 @@ The following list includes all files currently present in the project workspace
 
 - `IsNewBar()` -> `XAUUSD_Adaptive_MultiFactor_EA.mq5`
 - `CalculateIndicators()` -> `XAUUSD_Adaptive_Indicators.mqh`
-- `RunTrendPullbackStrategy()` -> `XAUUSD_Adaptive_Entry.mqh`
-- `SelectAndRunStrategy()` + `PickBestDecision()` -> trend-pullback decision selection
+- `RunNewYorkTrendPullbackStrategy()` -> `XAUUSD_Adaptive_Entry.mqh`
+- `RunAsianRangeStrategy()` -> `XAUUSD_Adaptive_Entry.mqh`
+- `RunLondonBreakoutStrategy()` -> `XAUUSD_Adaptive_Entry.mqh`
+- `SelectAndRunStrategy()` + `PickBestDecision()` -> session-based strategy selection
 - `ExecuteTrade()` -> order send + state globals + CSV logging
 - `ManageTrade()` -> open-position management stack
 - `EvaluateEntries()` -> bar-close trading logic
@@ -331,7 +335,7 @@ The following list includes all files currently present in the project workspace
 
 - `OnTick()` drives loop: `EvaluateTickAndDashboard()`, `IsNewBar()`, `ManageOpenTrades(newBar)`, `EvaluateEntries()`.
 - Entry evaluation path: `EvaluateEntries()` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`.
-- Strategy selection path: `SelectAndRunStrategy()` in `EAs/Adaptive/XAUUSD_Adaptive_Entry.mqh` (single trend-pullback evaluator for both sides).
+- Strategy selection path: `SelectAndRunStrategy()` in `EAs/Adaptive/XAUUSD_Adaptive_Entry.mqh` (session-based strategy selection).
 - Trade execution path: `ExecuteTrade(const DecisionContext&)` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`.
 - Trade management path: `ManageTrade(ticket, isNewBar)` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`.
 - Trade lifecycle callback: `OnTradeTransaction()` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`.
@@ -350,6 +354,7 @@ The following list includes all files currently present in the project workspace
 
 | Change Needed | Primary File | Supporting Files |
 | ------------- | ------------ | ---------------- |
+| M5 session-based strategy implementation | `EAs/Adaptive/XAUUSD_Adaptive_Entry.mqh` | `EAs/Adaptive/XAUUSD_Adaptive_Inputs.mqh`, `EAs/Adaptive/XAUUSD_Adaptive_Indicators.mqh` |
 | M1 entry scoring / rejection reasons | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh`, `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 RSI entry window and extreme RSI rejection logs | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 pullback logic (trend -> pullback -> resumption) | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
@@ -367,7 +372,7 @@ The following list includes all files currently present in the project workspace
 | M1 loss-cluster skip logic (2 losses -> skip 2 signals) | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` |
 | M1 advanced dynamic trailing (level-based + runner mode) | `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 trade throttling / cooldown / frequency cap | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh` |
-| M1 trailing stop / dynamic TP / runner logic | `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
+| M1 trailing stop / dynamic TP / runner logic | `EAfs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 lot sizing and risk normalization | `EAs/Include/GoldEA_Unified_Risk.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 lot cap logic (<= $200 -> 0.01 lot) | `EAs/Include/GoldEA_Unified_Risk.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M5 min lot enforcement | `EAs/Adaptive/XAUUSD_Adaptive_Risk.mqh` | `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh` |

@@ -31,14 +31,14 @@ Use this checklist when optimizing the EA in the MT5 Strategy Tester.
 *Goal: Achieve clean trend-following entries and reduce counter-trend noise.*
 - [ ] `InpFastEmaPeriod`
 - [ ] `InpSlowEmaPeriod`
-- [ ] `InpPullbackAtrFactor`
+- [ ] `InpPullbackAtrFactor` (*Note: For M1 Scalper, this is now part of an internal hybrid logic using `ATR * 0.4`*)
 - [ ] Session hours (e.g., `InpLondonStartHour`)
 
 #### Phase 2: Momentum & Volatility
 *Goal: Avoid weak/late signals and filter for energetic market conditions.*
 - [ ] `InpRsiBuyMin` / `InpRsiBuyMax`
 - [ ] `InpRsiSellMin` / `InpRsiSellMax`
-- [ ] `InpMinAtrPoints` (for M1 Scalper)
+- [ ] `InpMinAtrPoints` (for M1 Scalper) (*Note: M1 Scalper now uses an internal minimum ATR value filter of 1.0 and a dynamic EMA gap based on `ATR * 0.6`, making this input less critical or obsolete.*)
 - [ ] `InpSpikeCandleAtrFactor` (for M1 Scalper)
 
 #### Phase 3: Risk & Trade Management

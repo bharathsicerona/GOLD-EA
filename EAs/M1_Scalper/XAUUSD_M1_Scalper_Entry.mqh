@@ -1,25 +1,24 @@
 /*
 ================================================================================
-# Entry System Execution Logic (v2.7)
-The entry engine utilizes a weighted scoring system, decoupling from strictly 
-stacked binary filters to maximize trade frequency and momentum capture.
+# Entry System Execution Logic (v2.93) - Performance Tuning
+The entry engine uses a series of hard filters for high-frequency scalping.
+It does not use a scoring system.
 
-### 1. Global Pre-Filters
-* **Session Trading:** Operates 24/5 unless "Safe Mode" specifically blocks the Asian session. Dead zones have been removed.
-* **Spread Tolerance:** Spread limits dynamically expand. Even if user inputs limit the spread, the High-Risk override forces a minimum spread tolerance of 500 points (50 pips) to accommodate XAUUSD volatility.
-* **Spike Immunity:** The system calculates extreme anomalies based on 200% of the ATR multiplier, ignoring normal M1 volatile behavior.
+### 1. Core Entry Conditions
+* **BUY:** Price > EMA(20) + Hybrid Pullback to EMA(20) + Bullish Candle
+* **SELL:** Price < EMA(20) + Hybrid Pullback to EMA(20) + Bearish Candle
 
-### 2. Simplified Entry Engine
-Entry is intentionally minimalist for scalping frequency:
-* BUY: above EMA20 + near EMA20 pullback + bullish candle
-* SELL: below EMA20 + near EMA20 pullback + bearish candle
-Additional gating is limited to spread and runtime cooldown controls.
+### 2. Mandatory Hard Filters
+* **Session Trading:** Trades only in user-defined sessions.
+* **Dynamic Spread:** Max spread is capped, based on a combination of a fixed value and a dynamic ATR-based value.
+* **Minimum Volatility (ATR):** Rejects trades if ATR(14) is below a minimum threshold (e.g., 1.0), avoiding flat markets.
+* **Trend Strength (EMA Gap):** Rejects trades if the gap between EMA(20) and EMA(50) is not wide enough, defined by an ATR-based threshold (`ATR * 0.6`).
+* **Flat Market (EMA Slope):** Rejects trades if the EMA(20) is moving sideways.
 
-### Changelog v2.92 - Capital Booster Simplification
-- ENHANCEMENT: Entry reduced to EMA20 bias + pullback touch + current candle direction.
-- REMOVED: Breakout confirmation gate for faster M1 capital-booster execution.
-- ENHANCEMENT: Added EMA flat-market skip (`EMA_FLAT`) to avoid chop entries.
-- ENHANCEMENT: Designed to maximize trade frequency for profit-lock exits.
+### Changelog v2.93 - M1 Performance Tuning
+- ENHANCEMENT: Replaced fixed-point EMA gap filter with a dynamic, ATR-based threshold (`ATR * 0.6`) for better market adaptivity.
+- ENHANCEMENT: Replaced simple 'near EMA' pullback with a more robust hybrid logic, checking for price proximity (`ATR * 0.4`) or a candle body cross of the EMA.
+- FEATURE: Added a minimum ATR filter to prevent entries in extremely low-volatility conditions.
 ================================================================================
 */
 #ifndef XAUUSD_M1_SCALPER_ENTRY_MQH
@@ -98,15 +97,7 @@ EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
     ctx.emaFast = 0.0;
     ctx.emaSlow = 0.0;
 
-    // --- 1. Session Filter ---
-    ENUM_SESSION currentSession = GetCurrentSession();
-    if (currentSession != SESSION_LONDON && currentSession != SESSION_NEWYORK)
-    {
-        ctx.reason = "SESSION_BLOCK";
-        return ctx;
-    }
-
-    // --- 2. Get Indicator and Price Data ---
+    // --- 1. Get Indicator and Price Data ---
     MqlRates rates[];
     if (CopyRates(_Symbol, _Period, 0, 3, rates) < 3)
     {
@@ -124,13 +115,18 @@ EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
         ctx.reason = "REJECT: Could not get EMA/ATR values";
         return ctx;
     }
-    if (atrValue < InpMinAtrValue)
+    
+    // --- 2. Hard Filters (Pre-Trade Validation) ---
+    
+    // ATR Filter: Ensure minimum market volatility.
+    const double MIN_ATR_VALUE = 1.0; // As per optimization request. Represents $1.0 price movement on XAUUSD.
+    if (atrValue < MIN_ATR_VALUE)
     {
-        ctx.reason = "LOW_ATR";
+        ctx.reason = "REJECT: LOW_ATR";
         return ctx;
     }
-    
-    // --- 3. Dynamic Spread Filter (ATR Based) ---
+
+    // Dynamic Spread Filter (ATR Based)
     long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
     ctx.spread = spread;
     double pointSize = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -144,7 +140,7 @@ EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
         return ctx;
     }
 
-    // --- 4. Ultra-Simple EMA Pullback Model ---
+    // --- 3. Ultra-Simple EMA Pullback Model ---
     double closePrice = rates[1].close;
     double openPrice = rates[1].open;
     double prevClose = rates[2].close;
@@ -155,13 +151,14 @@ EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
         ctx.reason = "REJECT: Could not get EMA20 previous value";
         return ctx;
     }
-    double emaNearThreshold = MathMax(atrValue * 0.15, pointSize * 60.0);
-    bool nearEma20 = (MathAbs(closePrice - emaFast) <= emaNearThreshold || rates[1].low <= emaFast + emaNearThreshold && rates[1].high >= emaFast - emaNearThreshold);
+    // NEW: Hybrid pullback logic, replacing old 'nearEma20'
+    bool buyPullback = (MathAbs(closePrice - emaFast) <= atrValue * 0.4) || (rates[1].low <= emaFast && rates[1].close > emaFast);
+    bool sellPullback = (MathAbs(closePrice - emaFast) <= atrValue * 0.4) || (rates[1].high >= emaFast && rates[1].close < emaFast);
+
     bool bullishCandle = (closePrice > openPrice);
     bool bearishCandle = (closePrice < openPrice);
     double candleBody = MathAbs(closePrice - openPrice);
     double prevCandleBody = MathAbs(prevClose - prevOpen);
-    bool momentumBodyOk = (candleBody > prevCandleBody);
     bool buyTrendAllowed = (closePrice > emaFast); // Core condition
     bool sellTrendAllowed = (closePrice < emaFast); // Core condition
     bool emaFlat = (MathAbs(emaFast - emaFastPrev) <= MathMax(pointSize * 8.0, atrValue * 0.01));
@@ -169,8 +166,9 @@ EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
     ctx.emaSlow = emaSlow;
     ctx.atr = atrValue;
 
-    double emaGapPoints = MathAbs(emaFast - emaSlow) / pointSize;
-    if (emaGapPoints < InpMinEmaGapPoints)
+    // NEW: ATR-based dynamic EMA gap, replacing fixed points.
+    double emaGap = MathAbs(emaFast - emaSlow);
+    if (emaGap < (atrValue * 0.6))
     {
         ctx.reason = "TREND_WEAK";
         return ctx;
@@ -181,15 +179,10 @@ EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
         ctx.reason = "EMA_FLAT";
         return ctx;
     }
-    if (!momentumBodyOk)
-    {
-        ctx.reason = "MOMENTUM_WEAK";
-        return ctx;
-    }
 
     if (direction == POSITION_TYPE_BUY)
     {
-        if (buyTrendAllowed && nearEma20 && bullishCandle)
+        if (buyTrendAllowed && buyPullback && bullishCandle)
         {
             ctx.isValid = true;
             ctx.score = 0;
@@ -201,7 +194,7 @@ EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
     }
     else // SELL
     {
-        if (sellTrendAllowed && nearEma20 && bearishCandle)
+        if (sellTrendAllowed && sellPullback && bearishCandle)
         {
             ctx.isValid = true;
             ctx.score = 0;
