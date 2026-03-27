@@ -172,15 +172,6 @@ bool ExecuteTrade(const DecisionContext &context)
      }
 
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskDistance = CalculateFixedSLDistance(lot, balance);
-   if(riskDistance <= 0.0)
-     {
-      LogRejection(context.decision, "OTHER", lot, balance);
-      LogTyped("REJECTION", "Trade skipped because fixed monetary SL distance is invalid.");
-      LogToCSV("TRADE_SKIPPED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"FIXED_SL_INVALID");
-      return false;
-     }
-
    double tickSize   = SymbolInfoDouble(InpTradeSymbol,SYMBOL_TRADE_TICK_SIZE);
    double tickValue  = SymbolInfoDouble(InpTradeSymbol,SYMBOL_TRADE_TICK_VALUE);
    if(tickSize <= 0.0 || tickValue <= 0.0)
@@ -191,11 +182,36 @@ bool ExecuteTrade(const DecisionContext &context)
       return false;
      }
 
+   double riskDistance = CalculateFixedSLDistance(lot, balance);
+   if(riskDistance <= 0.0)
+     {
+      LogRejection(context.decision, "OTHER", lot, balance);
+      LogTyped("REJECTION", "Trade skipped because fixed monetary SL distance is invalid.");
+      LogToCSV("TRADE_SKIPPED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"FIXED_SL_INVALID");
+      return false;
+     }
+
+   // M5 structured risk: for 0.01 lot, enforce $10 stop risk.
+   if(lot <= 0.0100001)
+     {
+      double m5RiskUsd = 10.0;
+      double customDistance = (m5RiskUsd * tickSize) / (tickValue * lot);
+      if(customDistance <= 0.0)
+        {
+         LogRejection(context.decision, "OTHER", lot, balance);
+         LogTyped("REJECTION", "Trade skipped because custom M5 risk distance is invalid.");
+         LogToCSV("TRADE_SKIPPED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"M5_CUSTOM_RISK_INVALID");
+         return false;
+        }
+      riskDistance = customDistance;
+     }
+
    double moneyPerLot = (riskDistance / tickSize) * tickValue;
    double expectedLoss = lot * moneyPerLot;
 
    double actualRiskPercent = (expectedLoss / balance) * 100.0;
-   double tpDistance = riskDistance * 3.0;
+   double tpMultiple = 3.0;
+   double tpDistance = riskDistance * tpMultiple;
    double sl = 0.0;
    double tp = 0.0;
 
@@ -265,8 +281,8 @@ bool ExecuteTrade(const DecisionContext &context)
    if(InpEnablePushAlerts || InpEnableEmailAlerts)
      {
       string alertSubject = StringFormat("GoldEA %s %s Executed", context.strategyName, context.decision);
-      string alertMsg = StringFormat("Action: %s %s\nType: %s\nActual Risk: %.2f%%\nLot: %.2f\nEntry: %.2f\nSL: %.2f\nTP Dist: %.2f points\nScore: %d",
-                                     context.decision, InpTradeSymbol, context.strategyName, actualRiskPercent, lot, entryPrice, sl, tpDistance / _Point, context.score);
+      string alertMsg = StringFormat("Action: %s %s\nType: %s\nActual Risk: %.2f%%\nLot: %.2f\nEntry: %.2f\nSL: %.2f\nTP Dist: %.2f points\nTP R: %.1f\nScore: %d",
+                                     context.decision, InpTradeSymbol, context.strategyName, actualRiskPercent, lot, entryPrice, sl, tpDistance / _Point, tpMultiple, context.score);
       if(InpEnablePushAlerts) SendNotification(alertSubject + "\n" + alertMsg);
       if(InpEnableEmailAlerts) SendMail(alertSubject, alertMsg);
      }
@@ -309,11 +325,11 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
    double profitDistance = (type == POSITION_TYPE_BUY) ? (priceNow - openPrice)
                                                        : (openPrice - priceNow);
    double rMultiple = profitDistance / initialRisk;
-   const bool allowStopLossUpdates = false; // Fixed-SL mode: never override SL after entry.
+   const bool allowStopLossUpdates = false; // Keep legacy blocks disabled; custom M5 trailing below is active.
 
    // --- M5 R-Multiple Trailing Stop System ---
    string trailLevelKey = BuildStateKey("M5TrailLevel", ticket);
-   if (allowStopLossUpdates && GlobalVariableCheck(trailLevelKey))
+   if (GlobalVariableCheck(trailLevelKey))
    {
        int currentTrailLevel = (int)GlobalVariableGet(trailLevelKey);
        int desiredTrailLevel = currentTrailLevel;
@@ -321,16 +337,16 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
        // Determine the highest trail level the trade currently qualifies for
        if (rMultiple >= 2.5)      desiredTrailLevel = 4;
        else if (rMultiple >= 2.0) desiredTrailLevel = 3;
-       else if (rMultiple >= 1.0) desiredTrailLevel = 2;
-       else if (rMultiple >= 0.5) desiredTrailLevel = 1;
+       else if (rMultiple >= 1.5) desiredTrailLevel = 2;
+       else if (rMultiple >= 1.0) desiredTrailLevel = 1;
 
        // If the trade qualifies for a higher level than it's currently on
        if (desiredTrailLevel > currentTrailLevel)
        {
            double newSL_R = 0.0;
            // Get the target SL in R-terms based on the desired level
-           if (desiredTrailLevel == 1) newSL_R = 0.1; // At 0.5R profit, move SL to +0.1R
-           if (desiredTrailLevel == 2) newSL_R = 0.5; // At 1.0R profit, move SL to +0.5R
+           if (desiredTrailLevel == 1) newSL_R = 0.1; // At 1.0R profit, move SL to +0.1R
+           if (desiredTrailLevel == 2) newSL_R = 0.5; // At 1.5R profit, move SL to +0.5R
            if (desiredTrailLevel == 3) newSL_R = 1.0; // At 2.0R profit, move SL to +1.0R
            if (desiredTrailLevel == 4) newSL_R = 1.5; // At 2.5R profit, move SL to +1.5R
 

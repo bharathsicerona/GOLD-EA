@@ -31,29 +31,37 @@ The project is organized into a clean and modular structure to ensure clarity an
 
 This project includes three distinct Expert Advisors. Each has its own dedicated folder within the `EAs/` directory, containing the main `.mq5` file, any specific `.mqh` include files, and a detailed `README.md`.
 
-### 1. M5 Adaptive Multi-Factor EA
+### 1. M5 Adaptive (Capital Stabilizer) EA
 
 -   **Folder:** `EAs/Adaptive/`
--   **Strategy:** A sophisticated multi-factor model that adapts to changing market conditions on the M5 timeframe. It dynamically selects from multiple sub-strategies (e.g., Trend, Range, Breakout) based on a scoring system.
+-   **Role:** Capital Stabilizer (lower-frequency, higher-quality trades on M5).
+-   **Strategy:** Trend Pullback only (multi-strategy routing and score/penalty gating removed from live decision path):
+    - BUY: `EMA20 > EMA50` + pullback to `EMA20` + bullish candle
+    - SELL: `EMA20 < EMA50` + pullback to `EMA20` + bearish candle
+    - Session scope: Asian session only
+    - Minimum score gate: `InpMinimumScore = 80`
 -   **Risk Model:** Fixed monetary stop-loss model shared with M1:
-    - 0.01 lot -> SL risk = $3
+    - 0.01 lot -> SL risk = $10 (M5 structured high-impact mode)
     - 0.02 lot -> SL risk = $6
     - 0.03+ lots -> SL risk = 1% of account balance
-    TP remains RR-based from the computed SL distance.
+    TP remains RR-based from the computed SL distance (default 3R).
+    Trailing uses R-based locks: `1R -> +0.1R`, `1.5R -> +0.5R`, `2R -> +1R`, `2.5R -> +1.5R`.
 -   **More Info:** See the `EAs/Adaptive/README.md` for a full breakdown of the strategy and its parameters.
 
-### 2. M1 High-Risk Scalper EA
+### 2. M1 High-Risk Scalper (Capital Booster) EA
 
 -   **Folder:** `EAs/M1_Scalper/`
--   **Strategy:** An aggressive, high-frequency scalping strategy designed for the M1 timeframe. It aims to capture small, rapid price movements.
--   **Entry Quality Update:** M1 now uses a final price-action pullback model:
-    - Pullback is price-based: close near `EMA20` (stateful detection)
-    - Entry confirmation is candle-structure based (body direction + close near candle extreme)
-    - Wick rejection required (lower wick for BUY, upper wick for SELL)
-    - Trend gate uses price vs EMA20 (`Price > EMA20` for BUY, `Price < EMA20` for SELL)
-    - RSI is secondary support only (`RSI > 50` for BUY, `RSI < 50` for SELL), with no RSI momentum dependency
-    - Strong-candle boost: extra quality score when current candle body > previous candle body
-    - Hard rejects: `RSI_OVERBOUGHT` (BUY, RSI>75), `RSI_OVERSOLD` (SELL, RSI<25)
+-   **Role:** Capital Booster (higher-frequency scalping on M1).
+-   **Strategy:** Ultra-simple price-action pullback model:
+    - BUY: `Price > EMA20` + near/touch `EMA20` + current candle bullish
+    - SELL: `Price < EMA20` + near/touch `EMA20` + current candle bearish
+    - Trend-strength filter: `abs(EMA20-EMA50)` must exceed configured threshold
+    - Momentum filter: current candle body must exceed previous candle body
+    - Volatility filter: ATR must be above minimum threshold (`InpMinAtrValue`)
+    - Loss-cluster control: after 2 consecutive losses, skip next 2 entry signals
+    - Session scope: London + New York only (Asian disabled)
+    - Entry cooldown: 5 candles
+    - Removed from M1 entry: breakout logic, RSI gating, scoring, and complex momentum filters.
 -   **Risk Model:** Fixed monetary stop-loss model:
     - 0.01 lot -> SL risk = $3
     - 0.02 lot -> SL risk = $6
@@ -94,9 +102,13 @@ The project includes a powerful Python script to analyze the standardized log fi
 
 Analyzer capabilities now include:
 - Support for mixed legacy and new log formats (`[M1]`, `[M1_SCALPER]`, `[M5]` prefixes).
-- Automatic rejection-reason extraction (`LOW_SCORE`, `HIGH_SPREAD`, `INSUFFICIENT_MARGIN`, `COOLDOWN_ACTIVE`, `SESSION_BLOCK`).
+- Automatic rejection-reason extraction (e.g., `CORE_CONDITION_FAIL`, `HIGH_SPREAD`, `INSUFFICIENT_MARGIN`, `COOLDOWN_ACTIVE`, `COOLDOWN_2CANDLE`, `SESSION_BLOCK`).
 - Mixed-file EA separation (M1 and M5 split safely in a single run).
 - Improved trade linking using `tradeId` first, then timestamp+direction fallback when IDs are missing.
+- Lifecycle-based resolved trade tracking (entry/exit link required before counting as resolved).
+- Trailing SL classification fix: `STOP_LOSS_HIT` with positive profit is classified as `WIN`.
+- R-multiple computation standardized per lifecycle: `risk = abs(entry_price - initial_SL)`, `R = profit / risk`.
+- Unknown/`OTHER` rejection labels now normalize to `UNCLASSIFIED_REJECTION` for cleaner diagnostics.
 
 ### Requirements
 
@@ -126,11 +138,11 @@ The project now uses one shared fixed monetary stop-loss model across M1 and M5.
 - M5 integration: `ExecuteTrade()` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`
 - SL override behavior:
   - M1 `ManageTrailingStop()` is no-op in fixed-SL mode
-  - M5 SL-changing management blocks are gated off in fixed-SL mode
+  - M5 uses active R-based trailing in management mode
 
 ## Risk Model Update
 
-- Fixed SL:
+- Base fixed SL model (shared engine):
   - 0.01 lot -> $3
   - 0.02 lot -> $6
   - >=0.03 lot -> 1% account risk
@@ -143,6 +155,10 @@ The project now uses one shared fixed monetary stop-loss model across M1 and M5.
   - Dynamic lot sizing based on capital is retained
   - Minimum lot = 0.01
   - No upper cap (can scale to 0.02, 0.03, and above)
+  - Structured override for high-impact mode:
+    - 0.01 lot -> SL risk = $10
+    - TP default = 3R
+    - Trailing locks: 1R/+0.1R, 1.5R/+0.5R, 2R/+1R, 2.5R/+1.5R
 
 ## Logging System
 
@@ -178,45 +194,105 @@ The project now uses one shared fixed monetary stop-loss model across M1 and M5.
   - Resolved `illegal 'else' without matching 'if'`
   - Resolved `not all control paths return a value`
   - Root cause was misplaced context assignments between `if` and `else`; assignments are now before branch evaluation.
+- Fixed M5 compile scope issue in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`:
+  - Resolved `undeclared identifier 'balance'`
+  - Root cause was `balance` referenced before declaration in `ExecuteTrade()`
 
 ## M1 Entry Logic (Refined)
 
-- M1 entry now uses delayed structure-break confirmation after pullback.
+- M1 entry is now ultra-simple for high-frequency EMA pullback scalping.
 - Core required conditions:
-  - BUY: `Price > EMA20` + pullback near `EMA20`
-  - SELL: `Price < EMA20` + pullback near `EMA20`
-- Entry confirmation:
-  - BUY requires break above previous candle high after pullback
-  - SELL requires break below previous candle low after pullback
-- Delay rule:
-  - Wait at least 1 candle after pullback detection before entry confirmation.
-- Boost score model (trade if score `>= 2`):
-  - `+1` RSI aligned (BUY `RSI>50`, SELL `RSI<50`)
-  - `+1` wick rejection
-  - `+1` strong candle body (current > previous)
-  - `+1` strong EMA alignment
-  - `+1` optional micro-structure quality (higher-low/lower-high)
-- Hard blocks kept minimal:
-  - Spread too high
-  - RSI extremes (BUY `>80`, SELL `<20`)
-  - Cooldown/frequency controls in EA runtime
+  - BUY: `Price > EMA20` + `Price near/touch EMA20` + current candle bullish
+  - SELL: `Price < EMA20` + `Price near/touch EMA20` + current candle bearish
+- Removed from M1 entry:
+  - RSI filters
+  - score threshold gating
+  - previous-candle dependency
+  - structure-break confirmation
+  - momentum gating layers
+- Hard runtime safety retained:
+  - spread filter
+  - EMA flat-market skip
+  - trend-strength filter (`EMA20-EMA50` gap threshold)
+  - London/New York session-only filter
+  - cooldown controls (5-candle cooldown)
 - Signal checks are evaluated on new M1 candles only (not every tick).
 
 ## M1 Strategy Simplification
 
 - Removed excessive multi-layer hard filtering from M1 entry.
-- Converted non-core conditions into score boosts instead of absolute blockers.
-- Reduced dependency on strict indicator gating for more realistic execution.
+- Removed score-gate dependencies and indicator-heavy gating.
+- Kept only fast core entry pattern + runtime safety filters.
 
 ## M1 Entry Upgrade - Structure Break
+
+_Historical note: this mode has been superseded by the simplified scalping model below._
 
 - Entries are no longer taken directly at EMA pullback touch.
 - Pullback is tracked first, then confirmation requires a micro-structure break.
 - This delayed trigger improves timing by entering on continuation, not during retracement.
 
-## M1 Entry Final Model
+## M1 Simplified Scalping Strategy
 
-- Pullback is now defined using EMA20 proximity instead of RSI pullback bands.
-- Entry is confirmed by candle structure and wick rejection before execution.
-- RSI remains a secondary directional support filter only (no momentum/slope checks).
-- Final trigger quality is price-action-led, with optional strong-candle boost.
+- Pure price-action entry on EMA20 pullback + candle direction.
+- No RSI/score/structure-break dependency in entry trigger.
+- Exit profile for scalping/profit-lock:
+  - SL target set to `$2.0`
+  - Dynamic trailing model:
+    Profit `< +1.5` -> no SL move
+    `+1.5` -> lock `+$0.5`
+    `+2` -> lock `+$1`
+    `+3` to `+10` -> lock `profit - 1` (integer levels only)
+    `+12+` -> lock `profit - 2` (integer levels only)
+  - No fixed TP cap (runner-friendly with lock protection)
+
+## M1 Entry Refinement - Pullback Reversal
+
+_Historical note: this mode has been superseded by the ultra-simple final strategy below._
+
+- Entry now requires a candle-color reversal at pullback (previous opposite, current directional).
+- This aims to reach early `+$1` faster for BE/trailing activation in scalping mode.
+
+## M1 Active Rejection Reasons
+
+- `CORE_CONDITION_FAIL`
+- `HIGH_SPREAD`
+- `COOLDOWN_ACTIVE`
+- `COOLDOWN_5CANDLE`
+- `COOLDOWN_3CANDLE`
+- `TREND_WEAK`
+- `MOMENTUM_WEAK`
+- `LOW_ATR`
+- `LOSS_CLUSTER_COOLDOWN`
+- `MAX_TRADES_REACHED`
+- `INSUFFICIENT_MARGIN`
+- `ORDER_FAILED`
+- `RISK_ENGINE_BLOCK`
+- `INVALID_TICKVALUE`
+
+## M1 Final Strategy
+
+- Ultra-simple EMA20-based entry for high-frequency scalping.
+- No RSI, scoring, structure-break, or multi-layer entry filters.
+- Profit-lock exit model:
+  - initial SL = `$2.0`
+  - dynamic SL lock with runner mode:
+    `+1.5 -> +0.5`, `+2 -> +1`, `3..10 -> profit-1`, `12+ -> profit-2`
+
+## M1 Final Profit Engine
+
+- Aggressive trailing ladder tuned for positive expectancy.
+- Optimized initial SL (`$2.0`) for improved risk efficiency.
+- Controlled trade frequency via 5-candle cooldown.
+
+## Complementary Two-EA Model
+
+- M1 is the **Capital Booster**:
+  - Higher trade frequency
+  - Fast pullback entries around EMA20
+  - Profit-lock ladder for compounding
+- M5 is the **Capital Stabilizer**:
+  - Lower-frequency trend pullback entries
+  - EMA20/EMA50 direction alignment + Asian-only session focus
+  - Slightly higher minimum score gating (`80`) for entry stability
+  - Unified risk SL with 2R/3R TP targeting

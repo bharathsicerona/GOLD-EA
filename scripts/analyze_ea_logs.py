@@ -123,6 +123,23 @@ class Event:
     raw: str
 
 
+@dataclass
+class TradeLifecycle:
+    ea_type: str
+    trade_id: str
+    trade_type: str
+    entry_price: float | None
+    entry_time: str
+    lot: float | None
+    initial_sl: float | None
+    exit_price: float | None
+    exit_time: str
+    profit: float | None
+    result: str
+    risk: float | None
+    r_multiple: float | None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Analyze GoldEA MetaTrader 5 logs and generate a summary report."
@@ -241,10 +258,27 @@ def strip_log_type_tag(text: str) -> str:
 
 def extract_reason_from_text(text: str, default: str = "UNKNOWN") -> str:
     lowered = text.lower()
+    if "core_condition_fail" in lowered or "core condition fail" in lowered:
+        return "CORE_CONDITION_FAIL"
+    if "ema_flat" in lowered or "ema flat" in lowered:
+        return "EMA_FLAT"
+    if "cooldown_3candle" in lowered or "3candle" in lowered or "3-candle" in lowered:
+        return "COOLDOWN_3CANDLE"
+    if "cooldown_2candle" in lowered or "2candle" in lowered or "2-candle" in lowered:
+        return "COOLDOWN_2CANDLE"
+    if "risk_engine_block" in lowered or "risk engine block" in lowered:
+        return "RISK_ENGINE_BLOCK"
+    if "invalid_tickvalue" in lowered or "invalid tick value" in lowered:
+        return "INVALID_TICKVALUE"
+    if "order_failed" in lowered or "order failed" in lowered:
+        return "ORDER_FAILED"
     if "reason=" in lowered:
         kv = parse_kv_pairs(text)
         if kv.get("reason"):
-            return kv["reason"]
+            parsed = clean_reason(kv["reason"])
+            if parsed in {"OTHER", "UNKNOWN", ""}:
+                return "UNCLASSIFIED_REJECTION"
+            return parsed
     if "margin" in lowered:
         return "INSUFFICIENT_MARGIN"
     if "score <" in lowered or "low_score" in lowered or "score" in lowered and "reject" in lowered:
@@ -259,7 +293,10 @@ def extract_reason_from_text(text: str, default: str = "UNKNOWN") -> str:
         return "MAX_TRADES_REACHED"
     if "valid" in lowered or "signal" in lowered and "reject" not in lowered:
         return "VALID"
-    return default
+    cleaned_default = clean_reason(default or "UNKNOWN")
+    if cleaned_default in {"OTHER", "UNKNOWN", ""}:
+        return "UNCLASSIFIED_REJECTION"
+    return cleaned_default
 
 
 def parse_ts(timestamp_text: str) -> datetime | None:
@@ -507,9 +544,17 @@ def parse_result_line(line: str, source_file: Path, ea_type: str, timestamp: str
     action, result = "UNKNOWN", "UNKNOWN"
     reason = extract_reason_from_text(line, default="")
     if match.group("stop"):
-        action, result = "STOP_LOSS_HIT", "LOSS"
+        action = "STOP_LOSS_HIT"
+        if profit is not None and profit > 0:
+            result = "WIN"
+        else:
+            result = "LOSS"
     elif match.group("tp"):
-        action, result = "TAKE_PROFIT_HIT", "WIN"
+        action = "TAKE_PROFIT_HIT"
+        if profit is not None and profit < 0:
+            result = "LOSS"
+        else:
+            result = "WIN"
     elif match.group("be"):
         action, result = "BREAKEVEN", "BREAKEVEN"
     elif match.group("partial"):
@@ -736,6 +781,81 @@ def link_trade_outcomes(events: list[Event]) -> None:
         _assign_r_metrics(event, exec_event)
 
 
+def build_trade_lifecycle(events: list[Event]) -> list[TradeLifecycle]:
+    """
+    Builds per-trade lifecycle records for reliable resolved-trade accounting.
+    A trade is considered resolved only when an explicit exit/result event is linked.
+    """
+    executions: list[Event] = [e for e in events if e.action == "TRADE_EXECUTED"]
+    result_events: list[Event] = [e for e in events if e.result in {"WIN", "LOSS", "BREAKEVEN", "PARTIAL", "CLOSED"}]
+
+    by_id: dict[str, Event] = {e.trade_id: e for e in executions if e.trade_id}
+    used_exec: set[tuple[str, str]] = set()
+    trades: list[TradeLifecycle] = []
+
+    def _nearest_execution(result_event: Event) -> Event | None:
+        evt_ts = parse_ts(result_event.timestamp)
+        best_exec: Event | None = None
+        best_delta: float | None = None
+        for candidate in executions:
+            key = (candidate.timestamp, candidate.trade_type)
+            if key in used_exec:
+                continue
+            if result_event.trade_type and candidate.trade_type and result_event.trade_type != candidate.trade_type:
+                continue
+            cand_ts = parse_ts(candidate.timestamp)
+            if evt_ts and cand_ts:
+                delta = abs((evt_ts - cand_ts).total_seconds())
+                if delta > 3600:
+                    continue
+            else:
+                delta = 0.0
+            if best_delta is None or delta < best_delta:
+                best_delta = delta
+                best_exec = candidate
+        return best_exec
+
+    for result_event in result_events:
+        exec_event = by_id.get(result_event.trade_id) if result_event.trade_id else None
+        if not exec_event:
+            exec_event = _nearest_execution(result_event)
+        if not exec_event:
+            continue
+
+        used_exec.add((exec_event.timestamp, exec_event.trade_type))
+
+        risk = None
+        r_multiple = None
+        if exec_event.price is not None and exec_event.sl is not None and exec_event.price != exec_event.sl:
+            risk = abs(exec_event.price - exec_event.sl)
+            if result_event.profit is not None and risk > 0:
+                r_multiple = result_event.profit / risk
+
+        trade_result = result_event.result
+        if result_event.action == "STOP_LOSS_HIT" and result_event.profit is not None:
+            trade_result = "WIN" if result_event.profit > 0 else "LOSS"
+
+        trades.append(
+            TradeLifecycle(
+                ea_type=exec_event.ea_type,
+                trade_id=(result_event.trade_id or exec_event.trade_id or ""),
+                trade_type=(exec_event.trade_type or result_event.trade_type or ""),
+                entry_price=exec_event.price,
+                entry_time=exec_event.timestamp,
+                lot=parse_float(parse_kv_pairs(exec_event.raw).get("lot")) if exec_event.raw else None,
+                initial_sl=exec_event.sl,
+                exit_price=result_event.price,
+                exit_time=result_event.timestamp,
+                profit=result_event.profit,
+                result=trade_result,
+                risk=risk,
+                r_multiple=r_multiple,
+            )
+        )
+
+    return trades
+
+
 def summarize(events: list[Event]) -> dict[str, object]:
     """
     Compiles statistical metrics, win rates, session performance, and R-multiple
@@ -744,15 +864,16 @@ def summarize(events: list[Event]) -> dict[str, object]:
     attach_execution_scores(events)
     attach_skipped_context(events)
     link_trade_outcomes(events)
+    trades = build_trade_lifecycle(events)
 
     signal_events = [e for e in events if e.action == "SIGNAL_CHECK"]
     executed_events = [e for e in events if e.action == "TRADE_EXECUTED"]
     skipped_events = [
         e for e in events if e.result == "SKIPPED" and clean_reason(e.reason) not in VALID_REASONS
     ]
-    win_events = [e for e in events if e.result == "WIN"]
-    loss_events = [e for e in events if e.result == "LOSS"]
-    resolved_events = win_events + loss_events
+    resolved_trades = [t for t in trades if t.exit_time]
+    win_trades = [t for t in resolved_trades if t.result == "WIN"]
+    loss_trades = [t for t in resolved_trades if t.result == "LOSS"]
 
     buy_events = [e for e in executed_events if e.trade_type == "BUY"]
     sell_events = [e for e in executed_events if e.trade_type == "SELL"]
@@ -760,39 +881,52 @@ def summarize(events: list[Event]) -> dict[str, object]:
     avg_score = safe_average([e.score for e in executed_events if e.score is not None])
     avg_atr = safe_average([e.atr for e in signal_events + executed_events if e.atr is not None])
 
-    rejection_counter = Counter(e.reason for e in signal_events if e.result == "SKIPPED" and e.reason)
+    rejection_counter = Counter()
+    for e in signal_events:
+        if e.result != "SKIPPED":
+            continue
+        parsed_reason = ""
+        if e.reason and clean_reason(e.reason) != "OTHER":
+            parsed_reason = extract_reason_from_text(e.reason, default=e.reason)
+        else:
+            parsed_reason = extract_reason_from_text(e.raw or "", default=e.reason or "UNKNOWN")
+        rejection_counter[clean_reason(parsed_reason or "UNKNOWN")] += 1
     session_counter = Counter(e.session for e in signal_events + executed_events)
     reason_counter = Counter(e.reason for e in signal_events + executed_events if e.reason)
     action_counter = Counter(e.action for e in events)
 
-    total_resolved = len(resolved_events)
+    total_resolved = len(resolved_trades)
     total_signals = len(signal_events)
     total_executed = len(executed_events)
     total_skipped = len(skipped_events)
     execution_rate = (total_executed / total_signals * 100.0) if total_signals else 0.0
     rejection_rate = (total_skipped / total_signals * 100.0) if total_signals else 0.0
-    win_rate = (len(win_events) / total_resolved * 100.0) if total_resolved else 0.0
-    loss_rate = (len(loss_events) / total_resolved * 100.0) if total_resolved else 0.0
-    profit_values = [e.profit for e in resolved_events if e.profit is not None]
+    win_rate = (len(win_trades) / total_resolved * 100.0) if total_resolved else 0.0
+    loss_rate = (len(loss_trades) / total_resolved * 100.0) if total_resolved else 0.0
+    profit_values = [t.profit for t in resolved_trades if t.profit is not None]
     total_profit = sum(profit_values) if profit_values else 0.0
     avg_profit_per_trade = (total_profit / len(profit_values)) if profit_values else 0.0
 
     # Buy vs Sell Win Rates
-    buy_resolved = [e for e in resolved_events if e.trade_type == "BUY"]
-    sell_resolved = [e for e in resolved_events if e.trade_type == "SELL"]
-    buy_win_rate = (len([e for e in buy_resolved if e.result == "WIN"]) / len(buy_resolved) * 100.0) if buy_resolved else 0.0
-    sell_win_rate = (len([e for e in sell_resolved if e.result == "WIN"]) / len(sell_resolved) * 100.0) if sell_resolved else 0.0
+    buy_resolved = [t for t in resolved_trades if t.trade_type == "BUY"]
+    sell_resolved = [t for t in resolved_trades if t.trade_type == "SELL"]
+    buy_win_rate = (len([t for t in buy_resolved if t.result == "WIN"]) / len(buy_resolved) * 100.0) if buy_resolved else 0.0
+    sell_win_rate = (len([t for t in sell_resolved if t.result == "WIN"]) / len(sell_resolved) * 100.0) if sell_resolved else 0.0
 
     # Session Performance
     session_perf = {}
     for session in {"Asian", "London", "New York", "Off Session"}:
-        s_resolved = [e for e in resolved_events if e.session == session]
+        s_resolved = []
+        for t in resolved_trades:
+            sess = infer_session(t.exit_time or t.entry_time)
+            if sess == session:
+                s_resolved.append(t)
         if s_resolved:
-            s_wins = len([e for e in s_resolved if e.result == "WIN"])
+            s_wins = len([t for t in s_resolved if t.result == "WIN"])
             session_perf[session] = round(s_wins / len(s_resolved) * 100.0, 2)
 
     # R-Multiple Analysis
-    r_values = [e.r_multiple for e in resolved_events if e.r_multiple is not None]
+    r_values = [t.r_multiple for t in resolved_trades if t.r_multiple is not None]
     avg_r = safe_average(r_values)
     max_r = max(r_values) if r_values else None
     min_r = min(r_values) if r_values else None
@@ -815,6 +949,16 @@ def summarize(events: list[Event]) -> dict[str, object]:
         rejection_counter=rejection_counter,
         session_counter=session_counter,
     )
+    if total_resolved and len(r_values) != total_resolved:
+        insights.append(
+            f"R coverage gap: {len(r_values)}/{total_resolved} resolved trades have computable R."
+        )
+    if total_resolved:
+        priced_resolved = len([t for t in resolved_trades if t.profit is not None])
+        if priced_resolved != total_resolved:
+            insights.append(
+                f"Profit coverage gap: {priced_resolved}/{total_resolved} resolved trades have explicit profit values."
+            )
 
     total_rejections = sum(rejection_counter.values())
     rejection_reason_distribution = [
@@ -831,8 +975,8 @@ def summarize(events: list[Event]) -> dict[str, object]:
         "trades_skipped": total_skipped,
         "execution_rate": round(execution_rate, 2),
         "rejection_rate": round(rejection_rate, 2),
-        "wins": len(win_events),
-        "losses": len(loss_events),
+        "wins": len(win_trades),
+        "losses": len(loss_trades),
         "resolved_trades": total_resolved,
         "total_profit": round(total_profit, 2),
         "avg_profit_per_trade": round(avg_profit_per_trade, 2),
@@ -856,6 +1000,8 @@ def summarize(events: list[Event]) -> dict[str, object]:
         "reasons": reason_counter.most_common(),
         "sessions": session_counter.most_common(),
         "actions": action_counter.most_common(),
+        "closed_trades_count": len(resolved_trades),
+        "lifecycle_validation_ok": bool(total_resolved == len(r_values) or len(r_values) <= total_resolved),
         "insights": insights,
     }
 

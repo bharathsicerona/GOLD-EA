@@ -27,8 +27,8 @@ input string           InpTradeSymbol            = "XAUUSDm";
 input ENUM_TIMEFRAMES  InpTimeframe              = PERIOD_M5;
 input ulong            InpMagicNumber            = 26032026;
 
-input int              InpFastEmaPeriod          = 21;
-input int              InpSlowEmaPeriod          = 100;
+input int              InpFastEmaPeriod          = 20;
+input int              InpSlowEmaPeriod          = 50;
 input int              InpRsiPeriod              = 14;
 input int              InpAtrPeriod              = 14;
 
@@ -80,7 +80,7 @@ input int              InpNewYorkStartHour       = 13;
 input int              InpNewYorkEndHour         = 22;
 
 input ENUM_SCORE_MODE  InpUseScoring             = SCORE_ENABLED;
-input int              InpMinimumScore           = 75;
+input int              InpMinimumScore           = 80;
 input int              InpWeightTrend            = 30;
 input int              InpWeightEmaAlignment     = 25;
 input int              InpWeightRsi              = 20;

@@ -36,21 +36,20 @@ string NormalizeRejectReason(const string rawReason)
 {
    string u = rawReason;
    StringToUpper(u);
-   if(StringFind(u, "FALLBACK_ENTRY") >= 0) return "FALLBACK_ENTRY";
    if(StringFind(u, "CORE_CONDITION_FAIL") >= 0) return "CORE_CONDITION_FAIL";
-   if(StringFind(u, "WAIT_FOR_STRUCTURE_BREAK") >= 0) return "WAIT_FOR_STRUCTURE_BREAK";
-   if(StringFind(u, "WAIT_PULLBACK_DELAY") >= 0) return "WAIT_PULLBACK_DELAY";
-   if(StringFind(u, "NO_PULLBACK") >= 0) return "NO_PULLBACK";
-   if(StringFind(u, "NO_PRICE_ACTION_CONFIRMATION") >= 0) return "NO_PRICE_ACTION_CONFIRMATION";
-   if(StringFind(u, "NO_CANDLE_CONFIRMATION") >= 0) return "NO_CANDLE_CONFIRMATION";
-   if(StringFind(u, "NO_WICK_REJECTION") >= 0) return "NO_WICK_REJECTION";
-   if(StringFind(u, "NO_SECONDARY_RSI") >= 0) return "NO_SECONDARY_RSI";
-   if(StringFind(u, "TREND_MISMATCH") >= 0 || StringFind(u, "NO_TREND") >= 0) return "TREND_MISMATCH";
-   if(StringFind(u, "RSI_OVERBOUGHT") >= 0 || StringFind(u, "OVERBOUGHT") >= 0) return "RSI_OVERBOUGHT";
-   if(StringFind(u, "RSI_OVERSOLD") >= 0 || StringFind(u, "OVERSOLD") >= 0) return "RSI_OVERSOLD";
+   if(StringFind(u, "TREND_WEAK") >= 0) return "TREND_WEAK";
+   if(StringFind(u, "MOMENTUM_WEAK") >= 0) return "MOMENTUM_WEAK";
+   if(StringFind(u, "LOW_ATR") >= 0) return "LOW_ATR";
+   if(StringFind(u, "LOSS_CLUSTER_COOLDOWN") >= 0) return "LOSS_CLUSTER_COOLDOWN";
+   if(StringFind(u, "EMA_FLAT") >= 0) return "EMA_FLAT";
+   if(StringFind(u, "ORDER_FAILED") >= 0) return "ORDER_FAILED";
+   if(StringFind(u, "INVALID_TICKVALUE") >= 0) return "INVALID_TICKVALUE";
+   if(StringFind(u, "RISK_ENGINE_BLOCK") >= 0) return "RISK_ENGINE_BLOCK";
    if(StringFind(u, "SPREAD") >= 0) return "HIGH_SPREAD";
-   if(StringFind(u, "SCORE") >= 0) return "LOW_SCORE";
    if(StringFind(u, "ASIAN") >= 0 || StringFind(u, "SESSION") >= 0) return "SESSION_BLOCK";
+   if(StringFind(u, "5CANDLE") >= 0) return "COOLDOWN_5CANDLE";
+   if(StringFind(u, "3CANDLE") >= 0) return "COOLDOWN_3CANDLE";
+   if(StringFind(u, "2CANDLE") >= 0) return "COOLDOWN_2CANDLE";
    if(StringFind(u, "COOLDOWN") >= 0) return "COOLDOWN_ACTIVE";
    if(StringFind(u, "MAX") >= 0 || StringFind(u, "TRADE FREQUENCY") >= 0 || StringFind(u, "DUPLICATE") >= 0) return "MAX_TRADES_REACHED";
    if(StringFind(u, "MARGIN") >= 0) return "INSUFFICIENT_MARGIN";
@@ -60,10 +59,9 @@ string NormalizeRejectReason(const string rawReason)
 
 void CountRejection(const string reasonCode)
 {
-   if(reasonCode == "LOW_SCORE") rejectLowScore++;
-   else if(reasonCode == "HIGH_SPREAD") rejectSpread++;
+   if(reasonCode == "HIGH_SPREAD") rejectSpread++;
    else if(reasonCode == "SESSION_BLOCK") rejectSession++;
-   else if(reasonCode == "COOLDOWN_ACTIVE") rejectCooldown++;
+   else if(reasonCode == "COOLDOWN_ACTIVE" || reasonCode == "COOLDOWN_2CANDLE" || reasonCode == "COOLDOWN_3CANDLE" || reasonCode == "COOLDOWN_5CANDLE") rejectCooldown++;
    else if(reasonCode == "MAX_TRADES_REACHED") rejectMaxTrades++;
    else if(reasonCode == "INSUFFICIENT_MARGIN") rejectMargin++;
    else rejectOther++;
@@ -97,6 +95,8 @@ datetime g_lastCloseTime = 0;
 datetime g_lastTradeBarTime = 0;
 int g_lastBuyScore = 0;
 int g_lastSellScore = 0;
+int g_consecutiveLosses = 0;
+int g_skipSignalsRemaining = 0;
 
 // Indicator Handles
 int g_ema20Handle = INVALID_HANDLE;
@@ -167,22 +167,26 @@ void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction)
     double balance = AccountInfoDouble(ACCOUNT_BALANCE);
     double lotSize = 0.02; // Base lot for M1. Small accounts are forced to 0.01 below.
     lotSize = AdjustLotForM1(lotSize, balance);
-    double slPrice = 0.0; // Will be fully determined by unified fixed monetary SL logic.
-
-    // --- 3. APPLY UNIFIED RISK ENGINE ---
-    // This function will adjust lotSize and slPrice by reference to meet risk rules.
-    if (!CalculateTradeRisk((direction == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, entryPrice, lotSize, slPrice))
+    // Simplified M1 scalping exits: fixed monetary SL + profit-lock management
+    const double slUsd = 2.0;
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    if (tickSize <= 0.0 || tickValue <= 0.0 || lotSize <= 0.0)
     {
-        LogRejection((direction == POSITION_TYPE_BUY) ? "BUY" : "SELL", "RISK_ENGINE_BLOCK", lotSize);
-        return; // Risk engine determined the trade is not viable.
+        LogRejection((direction == POSITION_TYPE_BUY) ? "BUY" : "SELL", "INVALID_TICKVALUE", lotSize);
+        return;
     }
-    
-    // --- 4. Calculate Final TP and Normalize Stops ---
+
+    double slDistance = (slUsd * tickSize) / (tickValue * lotSize);
+    double minStopDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+    if (minStopDist > 0.0)
+    {
+        slDistance = MathMax(slDistance, minStopDist);
+    }
+
+    double slPrice = (direction == POSITION_TYPE_BUY) ? (entryPrice - slDistance) : (entryPrice + slDistance);
+    double tpPrice = 0.0; // No fixed TP; profit-lock/breakeven logic manages exits.
     double finalSlDistance = MathAbs(entryPrice - slPrice);
-    double tpDistance = finalSlDistance * InpRewardRiskRatio;
-    double tpPrice = (direction == POSITION_TYPE_BUY)
-                   ? entryPrice + tpDistance
-                   : entryPrice - tpDistance;
 
     // Final normalization after all calculations
     slPrice = NormalizeDouble(slPrice, g_symbolDigits);
@@ -195,8 +199,6 @@ void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction)
     }
 
     // --- 6. Calculate Final Initial Risk for Management Modules ---
-    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
     double initialRiskInCurrency = (finalSlDistance / tickSize) * tickValue * lotSize;
 
     // --- 7. Execute Trade ---
@@ -337,16 +339,24 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
                         g_initialRiskMap.Remove(position_id);
                         LogTyped("RESULT", StringFormat("risk_unmapped tradeId=%I64u", position_id));
                     }
+                    string trailLevelKey = BuildStateKey("m1traillevel", position_id);
+                    if (GlobalVariableCheck(trailLevelKey))
+                        GlobalVariableDel(trailLevelKey);
                     // Cooldown after loss
                     double dealProfit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
                     if(dealProfit < 0) {
                         g_lastLossTime = TimeCurrent();
                         totalLosses++;
+                        g_consecutiveLosses++;
+                        if(g_consecutiveLosses >= 2 && g_skipSignalsRemaining <= 0)
+                           g_skipSignalsRemaining = 2;
                         LogTyped("RESULT", StringFormat("STOP_LOSS_HIT tradeId=%I64u profit=%.2f", position_id, dealProfit));
                     } else if(dealProfit > 0) {
                         totalWins++;
+                        g_consecutiveLosses = 0;
                         LogTyped("RESULT", StringFormat("TAKE_PROFIT_HIT tradeId=%I64u profit=%.2f", position_id, dealProfit));
                     } else {
+                        g_consecutiveLosses = 0;
                         LogTyped("RESULT", StringFormat("BREAKEVEN tradeId=%I64u profit=%.2f", position_id, dealProfit));
                     }
                     // Cooldown after ANY trade
@@ -391,6 +401,13 @@ void OnTick()
         return;
     lastSignalEvalBar = currentSignalBar;
 
+    if (g_skipSignalsRemaining > 0)
+    {
+        LogRejection("BOTH", "LOSS_CLUSTER_COOLDOWN", 0.0);
+        g_skipSignalsRemaining--;
+        return;
+    }
+
     // --- 2. Check for New Trade Opportunities ---
     
     // Cooldown after loss check
@@ -405,10 +422,13 @@ void OnTick()
         return;
     }
 
-    // Smart Re-entry Filter: Ensure we are on a new M1 candle since the last trade
-    if (iTime(_Symbol, PERIOD_M1, 0) == g_lastTradeBarTime) {
-        LogRejection("BOTH", "MAX_TRADES_REACHED", 0.0);
-        return;
+    // Safety: bar-based cooldown after last executed trade
+    if (g_lastTradeBarTime > 0) {
+        int barsSinceLastTrade = iBarShift(_Symbol, PERIOD_M1, g_lastTradeBarTime, false);
+        if (barsSinceLastTrade >= 0 && barsSinceLastTrade < InpEntryCooldownCandles) {
+            LogRejection("BOTH", "COOLDOWN_5CANDLE", 0.0);
+            return;
+        }
     }
 
     // Trade Frequency Control (Max 3 trades per 5 minutes)
@@ -446,10 +466,7 @@ void OnTick()
         static datetime lastBuyRejectTime = 0;
         datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
         if (lastBuyRejectTime != currentBarTime) {
-            if (buyReasonCode == "RSI_OVERBOUGHT")
-                LogRejection("BUY", buyReasonCode, 0.0, buyContext.rsi);
-            else
-                LogRejection("BUY", buyReasonCode, 0.0);
+            LogRejection("BUY", buyReasonCode, 0.0);
             lastBuyRejectTime = currentBarTime;
         }
     }
@@ -470,10 +487,7 @@ void OnTick()
         static datetime lastSellRejectTime = 0;
         datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
         if (lastSellRejectTime != currentBarTime) {
-            if (sellReasonCode == "RSI_OVERSOLD")
-                LogRejection("SELL", sellReasonCode, 0.0, sellContext.rsi);
-            else
-                LogRejection("SELL", sellReasonCode, 0.0);
+            LogRejection("SELL", sellReasonCode, 0.0);
             lastSellRejectTime = currentBarTime;
         }
     }

@@ -9,16 +9,17 @@ stacked binary filters to maximize trade frequency and momentum capture.
 * **Spread Tolerance:** Spread limits dynamically expand. Even if user inputs limit the spread, the High-Risk override forces a minimum spread tolerance of 500 points (50 pips) to accommodate XAUUSD volatility.
 * **Spike Immunity:** The system calculates extreme anomalies based on 200% of the ATR multiplier, ignoring normal M1 volatile behavior.
 
-### 2. Weighted Scoring Engine
-Instead of rigid boolean pathways, trades are scored out of 100 points. 
-A score of 60+ executes a trade. This soft-filter approach captures trades 
-that miss "perfect" alignment but maintain strong statistical momentum.
+### 2. Simplified Entry Engine
+Entry is intentionally minimalist for scalping frequency:
+* BUY: above EMA20 + near EMA20 pullback + bullish candle
+* SELL: below EMA20 + near EMA20 pullback + bearish candle
+Additional gating is limited to spread and runtime cooldown controls.
 
-### Changelog v2.75 - Structure-Break Confirmation
-- ENHANCEMENT: Pullback is tracked as setup state; no entry on EMA touch.
-- ENHANCEMENT: Added minimum 1-candle delay after pullback detection.
-- ENHANCEMENT: Entry requires micro structure-break confirmation (previous candle high/low break).
-- ENHANCEMENT: Optional quality boosts retained (RSI alignment, wick rejection, strong candle, EMA strength, HL/LH).
+### Changelog v2.92 - Capital Booster Simplification
+- ENHANCEMENT: Entry reduced to EMA20 bias + pullback touch + current candle direction.
+- REMOVED: Breakout confirmation gate for faster M1 capital-booster execution.
+- ENHANCEMENT: Added EMA flat-market skip (`EMA_FLAT`) to avoid chop entries.
+- ENHANCEMENT: Designed to maximize trade frequency for profit-lock exits.
 ================================================================================
 */
 #ifndef XAUUSD_M1_SCALPER_ENTRY_MQH
@@ -46,7 +47,7 @@ enum ENUM_SESSION
     SESSION_NEWYORK
 };
 
-// Pullback continuation state (M1)
+// Pullback state placeholders (kept for interface compatibility)
 bool g_buyPullbackDetected = false;
 bool g_sellPullbackDetected = false;
 datetime g_buyPullbackBarTime = 0;
@@ -99,9 +100,9 @@ EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
 
     // --- 1. Session Filter ---
     ENUM_SESSION currentSession = GetCurrentSession();
-    if (InpSessionMode == SESSION_MODE_SAFE && currentSession == SESSION_ASIAN)
+    if (currentSession != SESSION_LONDON && currentSession != SESSION_NEWYORK)
     {
-        ctx.reason = "REJECT: Asian session disabled in Safe Mode";
+        ctx.reason = "SESSION_BLOCK";
         return ctx;
     }
 
@@ -114,19 +115,18 @@ EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
     }
     ArraySetAsSeries(rates, true);
 
-    double rsiValues[2];
-    if (CopyBuffer(g_rsiHandle, 0, 1, 2, rsiValues) < 2)
-    {
-        ctx.reason = "REJECT: Could not get RSI values";
-        return ctx;
-    }
-    ctx.rsi = rsiValues[0];
+    ctx.rsi = 0.0; // RSI intentionally removed from M1 simplified entry model.
     double emaSlow, emaFast, atrValue;
     if (!GetIndicatorValue(g_ema50Handle, 1, emaSlow) ||
         !GetIndicatorValue(g_ema20Handle, 1, emaFast) ||
         !GetIndicatorValue(g_atrHandle, 1, atrValue))
     {
         ctx.reason = "REJECT: Could not get EMA/ATR values";
+        return ctx;
+    }
+    if (atrValue < InpMinAtrValue)
+    {
+        ctx.reason = "LOW_ATR";
         return ctx;
     }
     
@@ -144,167 +144,71 @@ EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
         return ctx;
     }
 
-    // --- 4. Structure-Break Core + Score Model ---
-    int score = 0;
-    int passThreshold = 2; // 0..5 boost model
-    double emaGap = MathAbs(emaFast - emaSlow);
+    // --- 4. Ultra-Simple EMA Pullback Model ---
     double closePrice = rates[1].close;
     double openPrice = rates[1].open;
-    double highPrice = rates[1].high;
-    double lowPrice = rates[1].low;
-    double candleBody = MathAbs(closePrice - openPrice);
-    double prevBody = MathAbs(rates[2].close - rates[2].open);
-    double upperWick = MathMax(0.0, highPrice - MathMax(openPrice, closePrice));
-    double lowerWick = MathMax(0.0, MathMin(openPrice, closePrice) - lowPrice);
+    double prevClose = rates[2].close;
+    double prevOpen = rates[2].open;
+    double emaFastPrev;
+    if(!GetIndicatorValue(g_ema20Handle, 2, emaFastPrev))
+    {
+        ctx.reason = "REJECT: Could not get EMA20 previous value";
+        return ctx;
+    }
     double emaNearThreshold = MathMax(atrValue * 0.15, pointSize * 60.0);
-    bool nearEma20 = (MathAbs(closePrice - emaFast) <= emaNearThreshold);
+    bool nearEma20 = (MathAbs(closePrice - emaFast) <= emaNearThreshold || rates[1].low <= emaFast + emaNearThreshold && rates[1].high >= emaFast - emaNearThreshold);
     bool bullishCandle = (closePrice > openPrice);
     bool bearishCandle = (closePrice < openPrice);
-    bool buyWickRejection = (lowerWick >= MathMax(candleBody * 0.25, pointSize * 10.0));
-    bool sellWickRejection = (upperWick >= MathMax(candleBody * 0.25, pointSize * 10.0));
-    bool buyTrendAligned = (emaFast > emaSlow);
-    bool sellTrendAligned = (emaFast < emaSlow);
+    double candleBody = MathAbs(closePrice - openPrice);
+    double prevCandleBody = MathAbs(prevClose - prevOpen);
+    bool momentumBodyOk = (candleBody > prevCandleBody);
     bool buyTrendAllowed = (closePrice > emaFast); // Core condition
     bool sellTrendAllowed = (closePrice < emaFast); // Core condition
-    bool buyStructureBreak = (rates[1].high > rates[2].high && rates[1].close > rates[2].high);
-    bool sellStructureBreak = (rates[1].low < rates[2].low && rates[1].close < rates[2].low);
-    bool higherLow = (rates[1].low > rates[2].low);
-    bool lowerHigh = (rates[1].high < rates[2].high);
-    double rsiNow = rsiValues[0];
+    bool emaFlat = (MathAbs(emaFast - emaFastPrev) <= MathMax(pointSize * 8.0, atrValue * 0.01));
     ctx.emaFast = emaFast;
     ctx.emaSlow = emaSlow;
     ctx.atr = atrValue;
 
+    double emaGapPoints = MathAbs(emaFast - emaSlow) / pointSize;
+    if (emaGapPoints < InpMinEmaGapPoints)
+    {
+        ctx.reason = "TREND_WEAK";
+        return ctx;
+    }
+
+    if (emaFlat)
+    {
+        ctx.reason = "EMA_FLAT";
+        return ctx;
+    }
+    if (!momentumBodyOk)
+    {
+        ctx.reason = "MOMENTUM_WEAK";
+        return ctx;
+    }
+
     if (direction == POSITION_TYPE_BUY)
     {
-        // Hard block: extreme RSI only
-        if (rsiNow > 80.0)
-        {
-            ctx.reason = "RSI_OVERBOUGHT";
-            return ctx;
-        }
-
-        // Core trend alignment
-        if (!buyTrendAllowed)
-        {
-            ctx.reason = "CORE_CONDITION_FAIL";
-            g_buyPullbackDetected = false;
-            g_buyPullbackBarTime = 0;
-            return ctx;
-        }
-
-        // Pullback setup tracking (no entry on touch candle)
-        if (nearEma20)
-        {
-            g_buyPullbackDetected = true;
-            g_buyPullbackBarTime = rates[1].time;
-            ctx.reason = "WAIT_FOR_STRUCTURE_BREAK";
-            return ctx;
-        }
-
-        if (!g_buyPullbackDetected)
-        {
-            ctx.reason = "CORE_CONDITION_FAIL";
-            return ctx;
-        }
-
-        // Minimum 1 candle delay after pullback
-        if (rates[1].time <= g_buyPullbackBarTime)
-        {
-            ctx.reason = "WAIT_PULLBACK_DELAY";
-            return ctx;
-        }
-
-        // Structure-break confirmation after pullback
-        if (!(bullishCandle && buyStructureBreak))
-        {
-            ctx.reason = "WAIT_FOR_STRUCTURE_BREAK";
-            return ctx;
-        }
-
-        // Boost scoring (0..5)
-        if (rsiNow > 50.0) score += 1;           // RSI aligned (secondary only)
-        if (buyWickRejection) score += 1;        // Wick rejection
-        if (candleBody > prevBody) score += 1;   // Strong candle
-        if (buyTrendAligned && emaGap >= atrValue * 0.03) score += 1; // EMA alignment strength
-        if (higherLow) score += 1;               // Optional structure quality
-
-        ctx.score = score;
-        if (score >= passThreshold)
+        if (buyTrendAllowed && nearEma20 && bullishCandle)
         {
             ctx.isValid = true;
+            ctx.score = 0;
             ctx.reason = "VALID";
-            g_buyPullbackDetected = false;
-            g_buyPullbackBarTime = 0;
             return ctx;
         }
-        ctx.reason = "LOW_SCORE";
+        ctx.reason = "CORE_CONDITION_FAIL";
         return ctx;
     }
     else // SELL
     {
-        // Hard block: extreme RSI only
-        if (rsiNow < 20.0)
-        {
-            ctx.reason = "RSI_OVERSOLD";
-            return ctx;
-        }
-
-        // Core trend alignment
-        if (!sellTrendAllowed)
-        {
-            ctx.reason = "CORE_CONDITION_FAIL";
-            g_sellPullbackDetected = false;
-            g_sellPullbackBarTime = 0;
-            return ctx;
-        }
-
-        // Pullback setup tracking (no entry on touch candle)
-        if (nearEma20)
-        {
-            g_sellPullbackDetected = true;
-            g_sellPullbackBarTime = rates[1].time;
-            ctx.reason = "WAIT_FOR_STRUCTURE_BREAK";
-            return ctx;
-        }
-
-        if (!g_sellPullbackDetected)
-        {
-            ctx.reason = "CORE_CONDITION_FAIL";
-            return ctx;
-        }
-
-        // Minimum 1 candle delay after pullback
-        if (rates[1].time <= g_sellPullbackBarTime)
-        {
-            ctx.reason = "WAIT_PULLBACK_DELAY";
-            return ctx;
-        }
-
-        // Structure-break confirmation after pullback
-        if (!(bearishCandle && sellStructureBreak))
-        {
-            ctx.reason = "WAIT_FOR_STRUCTURE_BREAK";
-            return ctx;
-        }
-
-        // Boost scoring (0..5)
-        if (rsiNow < 50.0) score += 1;           // RSI aligned (secondary only)
-        if (sellWickRejection) score += 1;       // Wick rejection
-        if (candleBody > prevBody) score += 1;   // Strong candle
-        if (sellTrendAligned && emaGap >= atrValue * 0.03) score += 1; // EMA alignment strength
-        if (lowerHigh) score += 1;               // Optional structure quality
-
-        ctx.score = score;
-        if (score >= passThreshold)
+        if (sellTrendAllowed && nearEma20 && bearishCandle)
         {
             ctx.isValid = true;
+            ctx.score = 0;
             ctx.reason = "VALID";
-            g_sellPullbackDetected = false;
-            g_sellPullbackBarTime = 0;
             return ctx;
         }
-        ctx.reason = "LOW_SCORE";
+        ctx.reason = "CORE_CONDITION_FAIL";
         return ctx;
     }
     

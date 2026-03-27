@@ -24,10 +24,80 @@ double ProfitToPrice(const double profitInCurrency, const string symbol, const d
 // It moves the SL to predefined profit levels as the trade becomes more profitable.
 void ManageTrailingStop(const ulong ticket, const double profit)
 {
-    // Fixed-SL mode: stop-loss is set at entry and must not be modified later.
-    // Keep function as no-op to preserve execution flow without SL overrides.
-    if(ticket == 0 && profit < 0.0)
-        Log("ManageTrailingStop no-op.");
+    if (ticket == 0)
+        return;
+    if (!PositionSelectByTicket(ticket))
+        return;
+
+    ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+    double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+    double currentSL = PositionGetDouble(POSITION_SL);
+    double currentTP = PositionGetDouble(POSITION_TP);
+    // Advanced dynamic trailing:
+    // 1) No trailing zone: profit < 1.5
+    // 2) Initial protection: 1.5 -> +0.5, 2.0 -> +1.0
+    // 3) Core trailing (3..10): lock = profit_level - 1 (integer levels only)
+    // 4) Runner mode (12+): lock = profit_level - 2 (integer levels only)
+    if (profit < 1.5)
+        return;
+
+    int desiredLevel = 0;
+    double targetLockUsd = 0.0;
+    if (profit >= 12.0)
+    {
+        desiredLevel = (int)MathFloor(profit);
+        targetLockUsd = (double)desiredLevel - 2.0;
+    }
+    else if (profit >= 3.0)
+    {
+        desiredLevel = (int)MathFloor(profit);
+        targetLockUsd = (double)desiredLevel - 1.0;
+    }
+    else if (profit >= 2.0)
+    {
+        desiredLevel = 2;
+        targetLockUsd = 1.0;
+    }
+    else
+    {
+        desiredLevel = 1;
+        targetLockUsd = 0.5;
+    }
+
+    if (targetLockUsd <= 0.0)
+        return;
+
+    // Update per crossed level only.
+    string trailLevelKey = BuildStateKey("m1traillevel", ticket);
+    int lastAppliedLevel = 0;
+    if (GlobalVariableCheck(trailLevelKey))
+        lastAppliedLevel = (int)GlobalVariableGet(trailLevelKey);
+    if (desiredLevel <= lastAppliedLevel)
+        return;
+
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    double lockPriceDistance = ProfitToPrice(targetLockUsd, _Symbol, volume, type);
+    if (lockPriceDistance <= 0.0)
+        return;
+
+    double lockSL = (type == POSITION_TYPE_BUY) ? (openPrice + lockPriceDistance) : (openPrice - lockPriceDistance);
+
+    bool needsLock = false;
+    if (type == POSITION_TYPE_BUY)
+        needsLock = (currentSL <= 0.0 || currentSL < lockSL);
+    else
+        needsLock = (currentSL <= 0.0 || currentSL > lockSL);
+
+    if (!needsLock)
+        return;
+
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    lockSL = NormalizeDouble(lockSL, digits);
+    if (trade.PositionModify(ticket, lockSL, currentTP))
+    {
+        GlobalVariableSet(trailLevelKey, (double)desiredLevel);
+        Log(StringFormat("PROFIT_LOCK_APPLIED: ticket=%I64u profit=%.2f lock=%.2f sl=%.2f", ticket, profit, targetLockUsd, lockSL));
+    }
 }
 
 
