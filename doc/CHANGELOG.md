@@ -3,6 +3,128 @@
 This document summarizes the major changes, bug fixes, and strategic overhauls made to the Expert Advisors in this project.
 
 ---
+## M1 Scalper EA - Version 4.1 (Intelligence Upgrade)
+
+*   **[ENHANCEMENT] Upgraded Strategy Signal Structure:** The `StrategySignal` struct now includes `isStrong` and `isWeak` flags to better classify the quality of a signal.
+*   **[ENHANCEMENT] Improved Breakout Logic:** The breakout strategy now includes a candle quality check (body > 60% of range) to filter for higher quality breakouts.
+*   **[ENHANCEMENT] Improved Strategy Interaction Engine:** The `ProcessStrategySignals` function has been updated with a more sophisticated, priority-based rule set to improve trade selection.
+*   **[ENHANCEMENT] Improved Feedback Manager:** The `StrategyFeedbackManager` has been improved with more nuanced logic for handling in-trade signals, including a critical rule for immediate exit on an opposing liquidity sweep.
+*   **[LOGGING] Maintained Logging Compatibility:** All changes were made while preserving the existing logging structure to ensure compatibility with the log analyzer.
+
+---
+## M1 Scalper EA - Version 4.0 (Multi-Strategy Collaboration Model)
+
+*   **[REFACTOR] Multi-Strategy Execution Model:** The M1 Scalper has been upgraded from a single-strategy execution model to a multi-strategy collaboration model.
+*   **[FEATURE] New Strategy: M1_LIQUIDITY_SWEEP:** A new strategy has been added to detect and trade liquidity sweeps.
+*   **[FEATURE] Signal Interaction Engine:** A new `ProcessStrategySignals` function has been added to process signals from all strategies and make a final trading decision based on a set of rules.
+*   **[FEATURE] Strategy Feedback Manager:** A new `StrategyFeedbackManager` function has been added to manage open trades by reacting to new signals, allowing for dynamic trade management.
+*   **[REFACTOR] `ValidateEntry` Refactoring:** The `ValidateEntry` function has been refactored to evaluate all strategies and return an array of signals, instead of a single decision.
+*   **[ENHANCEMENT] Upgraded Breakout Strategy:** The breakout strategy has been enhanced to include a configurable lookback period and a stronger body check.
+*   **[LOGGING] New Log Types:** New log types have been added to provide more detailed information about the new multi-strategy system.
+
+---
+## M1 Scalper EA - Version 3.7 (Log System Parity)
+
+*   **[CRITICAL FIX] Corrected Strategy Name in Logs:** Fixed a critical logging error where M1 `CHECK` logs would hardcode `[M1_PA]` as the strategy. The logs now dynamically insert the correct strategy name (e.g., `[M1_BREAKOUT]`, `[M1_REVERSAL]`).
+*   **[IMPACT] Resolved Python Analyzer Mismatch:** This change resolves the long-standing "Regex Mismatch" issue, allowing the Python log analyzer to correctly parse and attribute signals to the specific M1 strategy that generated them. This unlocks accurate, strategy-level performance analysis for the M1 EA.
+*   **[COMPATIBILITY] Parser Alignment:** The M1 `CHECK` log format is now fully aligned with the Python parser's expectations and matches the logging convention used by the M5 EA.
+
+---
+## M1 Scalper EA - Version 3.6 (M1-M5 System Alignment)
+
+*   **[SYSTEM ALIGNMENT] Added M5 trend filter to M1 `ValidateEntry()`:**
+    *   BUY allowed only when M5 `EMA20 > EMA50`
+    *   SELL allowed only when M5 `EMA20 < EMA50`
+    *   Rejection reason: `M5_TREND_BLOCK`
+*   **[SYSTEM ALIGNMENT] SELL temporarily disabled (debug phase):**
+    *   SELL path returns `SELL_DISABLED_DEBUG`
+*   **[SYSTEM ALIGNMENT] Entry quality tightened:** score threshold increased from `>=4` to `>=6` with `SCORE_TOO_LOW` on failure.
+*   **[COMPATIBILITY] Logging contract preserved:** `CHECK/REJECTION/EXECUTION` structure unchanged.
+
+---
+## M1 Scalper EA - Version 3.5 (Balanced Cohesive Entry/Exit System)
+
+*   **[NEW SYSTEM] Balanced entry model in `ValidateEntry()`:**
+    *   Core trend kept: BUY `EMA20 > EMA50`, SELL `EMA20 < EMA50`
+    *   Pullback primary condition widened to ATR band (`EMA20 +/- ATR*0.20`)
+    *   Required momentum with stronger threshold (`ATR*0.10`) and explicit `MOMENTUM_WEAK` rejection
+    *   Breakout softened to booster-only with ATR tolerance:
+        *   BUY: `mid > prevHigh - ATR*0.02`
+        *   SELL: `mid < prevLow + ATR*0.02`
+*   **[NEW SYSTEM] Entry timing anti-noise gate:** Added `EARLY_NOISE` rejection when `abs(mid-open0) < ATR*0.03`.
+*   **[UPDATED] Scoring model:** Core `+2`, Pullback `+1`, Momentum `+2`, Breakout `+1`, EMA separation booster `+1` (directional), min score `4`, and directional dominance requirement.
+*   **[NEW SYSTEM] SL/TP model in execution:** Replaced fixed-$ SL with ATR-based structure:
+    *   `slDistance = clamp(ATR*0.8, 2.0, 5.0)`
+    *   `tpDistance = slDistance * 1.5`
+*   **[NEW SYSTEM] Runner management aligned to R-multiples:**
+    *   `>1R`: move SL to breakeven
+    *   `>1.5R`: lock `+0.5R`
+    *   `>2R`: trail by `1R`
+*   **[LOGGING] CHECK payload extended:** Added `slDistance` and `tpDistance` fields while preserving `CHECK/REJECTION/EXECUTION` format contract.
+*   **[COMPATIBILITY] Analyzer mapping updated:** Added `EARLY_NOISE` normalization in rejection reason mapping.
+
+---
+## M1 Scalper EA - Version 3.4 (Breakout Mandatory + Stricter Quality Gate)
+
+*   **[CRITICAL] Breakout now mandatory:** Breakout is no longer optional scoring only. `ValidateEntry()` now rejects entries with `NO_BREAKOUT` if:
+    *   BUY: `mid <= prevHigh`
+    *   SELL: `mid >= prevLow`
+    This check is applied after core condition validation and before score threshold checks.
+*   **[ENHANCEMENT] Momentum threshold strengthened:** Momentum confirmation increased from `ATR * 0.05` to `ATR * 0.10` for both directions.
+*   **[ENHANCEMENT] Score quality threshold raised:** Minimum entry score increased from `3` to `4` (`SCORE_TOO_LOW` on failure).
+*   **[ENHANCEMENT] Breakout score weight increased:** Breakout score contribution raised from `+1` to `+2` per direction (while remaining mandatory).
+*   **[COMPATIBILITY] Structured reason mapping expanded:** Added `NO_BREAKOUT` mapping in `NormalizeRejectReason()` without removing existing reason code mappings.
+*   **[LOGGING] CHECK field continuity preserved:** M1 CHECK logs continue to include appended `momentum`, `breakoutBuy`, and `breakoutSell` fields with unchanged log type structure.
+
+---
+## M1 Scalper EA - Version 3.3 (Quality Filters and Score Clarity)
+
+*   **[CRITICAL] Momentum logic hardened:** Replaced weak momentum checks (`mid > open0` / `mid < open0`) with ATR-thresholded momentum:
+    *   Buy: `(mid - open0) > atr * 0.05`
+    *   Sell: `(open0 - mid) > atr * 0.05`
+*   **[FEATURE] Micro-breakout edge filter:** Added previous-candle breakout booster:
+    *   Buy breakout: `mid > prevHigh`
+    *   Sell breakout: `mid < prevLow`
+    *   Each breakout adds `+1` score to its side.
+*   **[FIX] Directional EMA-separation scoring:** EMA separation score no longer benefits both sides simultaneously; it is now awarded only to the trend-aligned side.
+*   **[ENHANCEMENT] Structured rejection reasons:** Introduced clearer scoring conflict reasons in `ValidateEntry()`:
+    *   `SCORE_TOO_LOW`
+    *   `DIRECTION_CONFLICT`
+    while keeping `CORE_CONDITION_FAIL` unchanged.
+*   **[LOGGING] CHECK payload extension:** Appended `momentum`, `breakoutBuy`, and `breakoutSell` fields to M1 CHECK logs without changing `CHECK/REJECTION/EXECUTION` structure.
+
+---
+## M1 Scalper EA - Version 3.2 (Scoring Entry Refactor)
+
+*   **[REFACTOR] ValidateEntry scoring model:** Replaced strict binary entry acceptance in `ValidateEntry()` with a lightweight score model while keeping the same function signature and EA call flow.
+*   **[KEEP] Hard safety filters preserved:** ATR minimum and dynamic spread filter remain mandatory pre-entry gates.
+*   **[FEATURE] Directional scoring added:**
+    *   Core trend condition = `+2`
+    *   Pullback touch/reclaim (candle0) = `+1`
+    *   EMA separation booster = `+1`
+    *   Momentum booster = `+1`
+*   **[FEATURE] Directional strength guard:** Trade is valid only when side score is `>= 3` and strictly greater than opposite side score.
+*   **[ENHANCEMENT] Earlier signal detection:** Pullback confirmation now uses current candle (`candle0`) touch/reclaim checks for faster entry context.
+*   **[LOGGING] CHECK payload updated:** M1 CHECK lines now include `buyScore` and `sellScore` fields while preserving existing `CHECK/REJECTION/EXECUTION` contract.
+*   **[COMPATIBILITY] Reason code mapping preserved:** New outcomes reuse existing rejection reason taxonomy (`CORE_CONDITION_FAIL`, `MOMENTUM_WEAK`, `TREND_WEAK`, `LOW_ATR`, `HIGH_SPREAD`, etc.).
+
+---
+## M1 Scalper EA - Version 3.1 (Entry Logic Tuning)
+
+*   **[ENHANCEMENT] Dynamic EMA Gap Filter:** The trend strength filter, which checks the gap between the fast and slow EMAs, was updated. It now uses a dynamic, ATR-based threshold (`ATR * 0.6`) instead of a fixed point value. This allows the filter to adapt to changing market volatility, requiring a wider EMA separation in volatile markets and a smaller one in quiet markets.
+*   **[ENHANCEMENT] Hybrid Pullback Logic:** The condition for identifying a pullback to the EMA20 has been significantly improved. The new hybrid logic now validates a pullback if either the price is within a certain ATR-based distance (`ATR * 0.4`) of the EMA, OR if the candle body explicitly crosses over the EMA, providing a much more reliable entry signal.
+*   **[FEATURE] Minimum Volatility Filter:** A new hard filter was added to prevent the EA from trading in extremely flat or non-volatile market conditions. Trades are now rejected if the current ATR value is below a minimum threshold (e.g., 1.0 for XAUUSD). This helps avoid low-probability "chop" entries.
+*   **[DOCS] Updated Entry Logic Documentation:** The header comments in `XAUUSD_M1_Scalper_Entry.mqh` have been updated to reflect the new, more sophisticated entry conditions.
+
+---
+## Dashboard & UI Enhancements - Version 4.4
+
+*   **[FEATURE] Added Dashboard to M1 Scalper EA:** Implemented a new dashboard for the M1 Scalper EA, reusing the existing dashboard code from the M5 Adaptive EA. This provides a consistent user interface across both EAs.
+*   **[FEATURE] Standardized Dashboard Titles:** The dashboard titles for both EAs have been updated to be dynamic and clearly identify the running EA. The new titles are "GOLD EA M1 Dashboard" and "GOLD EA M5 Dashboard".
+*   **[ENHANCEMENT] Consistent UI:** Ensured that the layout, UI behavior, and overall look and feel of the dashboards are consistent for both EAs.
+*   **[REFACTOR] Modular Dashboard Code:** The dashboard logic for the M1 EA has been encapsulated in `XAUUSD_M1_Scalper_Logging.mqh` and `XAUUSD_M1_Scalper_Management.mqh` to mirror the structure of the M5 EA.
+
+---
 ## Unified Logging System - Version 1.0
 
 *   **[REFACTOR] Standardized Logging System:** Implemented a new, unified logging system across both the M1 Scalper and M5 Adaptive EAs to ensure all log outputs are clearly identifiable and consistently formatted.

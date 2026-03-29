@@ -1,34 +1,37 @@
 /*
 ================================================================================
-# Entry System Execution Logic (v2.7)
-The entry engine utilizes a weighted scoring system, decoupling from strictly 
-stacked binary filters to maximize trade frequency and momentum capture.
-
-### 1. Global Pre-Filters
-* **Session Trading:** Operates 24/5 unless "Safe Mode" specifically blocks the Asian session. Dead zones have been removed.
-* **Spread Tolerance:** Spread limits dynamically expand. Even if user inputs limit the spread, the High-Risk override forces a minimum spread tolerance of 500 points (50 pips) to accommodate XAUUSD volatility.
-* **Spike Immunity:** The system calculates extreme anomalies based on 200% of the ATR multiplier, ignoring normal M1 volatile behavior.
-
-### 2. Weighted Scoring Engine
-Instead of rigid boolean pathways, trades are scored out of 100 points. 
-A score of 60+ executes a trade. This soft-filter approach captures trades 
-that miss "perfect" alignment but maintain strong statistical momentum.
-
-### Changelog v2.70 - Bi-directional Trading Upgrade
-- ENHANCEMENT: Applied strictly symmetric scoring logic to perfectly balance BUY and SELL entries.
-- ENHANCEMENT: Removed hard counter-trend rejection blocks. Early price reversals can now trigger entries before EMAs fully cross.
-- ENHANCEMENT: Adjusted Fallback weighting to guarantee execution if EMA Trend and RSI (>50 / <50) align.
+# Entry System Execution Logic (v3.0) - Scoring model
+Hard filters: ATR minimum + dynamic spread only.
+Scoring (per side): core trend +2, pullback +1, EMA separation +1, momentum +1.
+Valid entry when directional score >= 3, core trend true for that side, and score beats the opposite side.
 ================================================================================
 */
 #ifndef XAUUSD_M1_SCALPER_ENTRY_MQH
 #define XAUUSD_M1_SCALPER_ENTRY_MQH
 
 // --- Structs and Enums ---
+struct StrategySignal {
+    string name;
+    int direction; // BUY or SELL
+    bool valid;
+    double strength;
+    bool isStrong;
+    bool isWeak;
+};
+
 struct EntryContext
 {
     bool   isValid;
     string reason;
-    // Add other context fields as needed for logging
+    string strategy;
+    double atr;
+    double atrAvg;
+    long   spread;
+    double rsi;
+    double emaFast;
+    double emaSlow;
+    double slDistance;
+    double tpDistance;
 };
 
 enum ENUM_SESSION
@@ -38,6 +41,20 @@ enum ENUM_SESSION
     SESSION_LONDON,
     SESSION_NEWYORK
 };
+
+// Pullback state placeholders (kept for interface compatibility)
+bool g_buyPullbackDetected = false;
+bool g_sellPullbackDetected = false;
+datetime g_buyPullbackBarTime = 0;
+datetime g_sellPullbackBarTime = 0;
+
+void ResetPullbackState()
+{
+    g_buyPullbackDetected = false;
+    g_sellPullbackDetected = false;
+    g_buyPullbackBarTime = 0;
+    g_sellPullbackBarTime = 0;
+}
 
 
 // --- Helper Functions ---
@@ -60,131 +77,311 @@ ENUM_SESSION GetCurrentSession()
     return SESSION_NONE;
 }
 
-//+------------------------------------------------------------------+
-//| ValidateEntry - High-Risk Scalping Logic                         |
-//+------------------------------------------------------------------+
-// This function replaces the old scoring system with a series of hard filters
-// designed for the high-risk, high-reward scalping model.
-EntryContext ValidateEntry(const ENUM_POSITION_TYPE direction)
+struct StrategyContext
 {
-    EntryContext ctx;
-    ctx.isValid = false; // Default to invalid
+    string strategyName;
+};
 
-    // --- 1. Session Filter ---
-    ENUM_SESSION currentSession = GetCurrentSession();
-    if (InpSessionMode == SESSION_MODE_SAFE && currentSession == SESSION_ASIAN)
+//+------------------------------------------------------------------+
+//| AdaptiveFilterCheck - Pre-strategy market condition filter       |
+//+------------------------------------------------------------------+
+bool AdaptiveFilterCheck(string &reason, double atr, double emaFast, double emaSlow, bool isBreakout)
+{
+    // 1. ATR DYNAMIC FILTER
+    double atrArr[];
+    if (CopyBuffer(g_atrHandle, 0, 1, 20, atrArr) != 20) return true; // Fail open if data is not ready
+    double atrAvg = 0;
+    for(int i = 0; i < 20; i++) atrAvg += atrArr[i];
+    atrAvg /= 20.0;
+
+    if(atr < atrAvg * 0.8)
     {
-        ctx.reason = "REJECT: Asian session disabled in Safe Mode";
-        return ctx;
+        reason = "LOW_ATR_DYNAMIC";
+        return false;
     }
 
-    // --- 2. Get Indicator and Price Data ---
-    MqlRates rates[];
-    if (CopyRates(_Symbol, _Period, 0, 3, rates) < 3)
+    // 2. TREND STRENGTH FILTER
+    double emaGap = MathAbs(emaFast - emaSlow);
+    if(atr > 0)
     {
-        ctx.reason = "REJECT: Not enough bar data";
-        return ctx;
+        double trendStrength = emaGap / atr;
+        if(trendStrength < 0.1)
+        {
+            reason = "WEAK_TREND";
+            return false;
+        }
+    }
+
+    // 3. CHOP DETECTION
+    MqlRates rates[];
+    if (CopyRates(_Symbol, _Period, 0, 5, rates) != 5) return true; // Fail open
+    double high5 = rates[0].high;
+    double low5 = rates[0].low;
+    for(int i = 1; i < 5; i++)
+    {
+        if(rates[i].high > high5) high5 = rates[i].high;
+        if(rates[i].low < low5) low5 = rates[i].low;
+    }
+    double range5 = high5 - low5;
+    if(range5 < atr * 1.2)
+    {
+        reason = "CHOP_MARKET_DYNAMIC";
+        return false;
+    }
+    
+    // 4. CANDLE QUALITY FILTER
+    double body = MathAbs(rates[0].close - rates[0].open);
+    if(body < atr * 0.3)
+    {
+        reason = "WEAK_CANDLE_DYNAMIC";
+        return false;
+    }
+    
+    // 5. BREAKOUT QUALITY FILTER
+    if(isBreakout)
+    {
+        // Assuming breakout size is the distance from the breakout level to the current price
+        // This check is better done inside the breakout logic itself.
+        // For now, we'll just check the candle body again.
+        if(body < atr * 0.5)
+        {
+            reason = "WEAK_BREAKOUT_DYNAMIC";
+            return false;
+        }
+    }
+    
+    // 6. SESSION ADAPTIVE FILTER
+    ENUM_SESSION currentSession = GetCurrentSession();
+    if (currentSession == SESSION_NEWYORK)
+    {
+        if(atr < atrAvg)
+        {
+            reason = "NY_WEAK_CONDITION";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| CheckLiquiditySweep - New strategy for M1 Scalper                |
+//+------------------------------------------------------------------+
+bool CheckLiquiditySweep(int direction, StrategyContext &ctx)
+{
+    MqlRates rates[];
+    if(CopyRates(_Symbol, _Period, 0, 2, rates) < 2)
+        return false;
+
+    ArraySetAsSeries(rates, true);
+
+    double atrValue = 0.0;
+    if(!GetIndicatorValue(g_atrHandle, 1, atrValue))
+        return false;
+
+    bool triggered = false;
+
+    if(direction == POSITION_TYPE_BUY)
+    {
+        // Previous high is taken, candle leaves upper wick, and closes back below breakout level
+        if(rates[0].high > rates[1].high && (rates[0].high - rates[0].close) > (atrValue * 0.2) && rates[0].close < rates[1].high)
+        {
+            ctx.strategyName = "M1_LIQUIDITY_SWEEP";
+            triggered = true;
+        }
+    }
+    else if(direction == POSITION_TYPE_SELL)
+    {
+        // Previous low is taken, candle leaves lower wick, and closes back above breakout level
+        if(rates[0].low < rates[1].low && (rates[0].close - rates[0].low) > (atrValue * 0.2) && rates[0].close > rates[1].low)
+        {
+            ctx.strategyName = "M1_LIQUIDITY_SWEEP";
+            triggered = true;
+        }
+    }
+
+    return triggered;
+}
+
+//+------------------------------------------------------------------+
+//| ValidateEntry - Evaulates all strategies and returns signals     |
+//+------------------------------------------------------------------+
+void ValidateEntry(StrategySignal &signals[])
+{
+    // Initialize signals
+    ArrayResize(signals, 4);
+    for(int i = 0; i < 4; i++)
+    {
+        signals[i].valid = false;
+        signals[i].isStrong = false;
+        signals[i].isWeak = false;
+    }
+    signals[0].name = "M1_EMA_PULLBACK";
+    signals[1].name = "M1_BREAKOUT";
+    signals[2].name = "M1_REVERSAL";
+    signals[3].name = "M1_LIQUIDITY_SWEEP";
+
+
+    MqlRates rates[];
+    if (CopyRates(_Symbol, _Period, 0, InpBreakoutCandles + 1, rates) < InpBreakoutCandles + 1)
+    {
+        return;
     }
     ArraySetAsSeries(rates, true);
 
-    double rsiValues[2];
-    if (CopyBuffer(g_rsiHandle, 0, 1, 2, rsiValues) < 2)
-    {
-        ctx.reason = "REJECT: Could not get RSI values";
-        return ctx;
-    }
-    double emaSlow, emaFast, atrValue;
+    double rsiValue = 0.0;
+    double emaSlow = 0.0;
+    double emaFast = 0.0;
+    double atrValue = 0.0;
     if (!GetIndicatorValue(g_ema50Handle, 1, emaSlow) ||
         !GetIndicatorValue(g_ema20Handle, 1, emaFast) ||
-        !GetIndicatorValue(g_atrHandle, 1, atrValue))
+        !GetIndicatorValue(g_atrHandle, 1, atrValue) ||
+        !GetIndicatorValue(g_rsiHandle, 1, rsiValue))
     {
-        ctx.reason = "REJECT: Could not get EMA/ATR values";
-        return ctx;
+        return;
     }
-    
-    // --- 3. Dynamic Spread Filter (ATR Based) ---
+
+    double atrAvgValue = atrValue;
+    double atrArr[];
+    if (CopyBuffer(g_atrHandle, 0, 1, 20, atrArr) == 20)
+    {
+        double sum = 0;
+        for (int i = 0; i < 20; i++) sum += atrArr[i];
+        atrAvgValue = sum / 20.0;
+    }
+
+    const double MIN_ATR_VALUE = 1.0;
+    if (atrValue < MIN_ATR_VALUE)
+    {
+        return;
+    }
+
     long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
     double pointSize = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    long dynamicSpreadMax = (long)((atrValue * 0.25) / pointSize); // Allow spread up to 25% of current ATR for spikes
+    if (pointSize <= 0.0)
+    {
+        return;
+    }
+    long dynamicSpreadMax = (long)((atrValue * 0.25) / pointSize);
     long maxAllowedSpread = MathMax((long)InpMaxSpreadPoints, dynamicSpreadMax);
-    maxAllowedSpread = MathMax(maxAllowedSpread, 500); // Absolute floor of 500
+    maxAllowedSpread = MathMax(maxAllowedSpread, 500);
 
     if (spread > maxAllowedSpread)
     {
-        ctx.reason = StringFormat("REJECT: Spread too high (%d > %d)", spread, maxAllowedSpread);
-        return ctx;
+        return;
     }
 
-    // --- 4. Spike Candle Filter ---
-    double candleRange = rates[1].high - rates[1].low;
-    // Relaxed spike filter to prevent over-filtering (threshold doubled)
-    if (candleRange > atrValue * (InpSpikeCandleAtrFactor * 2.0))
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double mid = (bid + ask) * 0.5;
+
+    // --- STRATEGY 1: EMA PULLBACK ---
+    if ((emaFast > emaSlow) && (mid <= emaFast + (atrValue * 0.2)) && (mid >= emaSlow))
     {
-        ctx.reason = StringFormat("REJECT: Spike candle detected (Range %.2f > ATR %.2f)", candleRange, atrValue);
-        return ctx;
+        signals[0].valid = true;
+        signals[0].direction = POSITION_TYPE_BUY;
+        signals[0].strength = 1.0;
     }
-
-    // --- 5. Weighted Scoring Engine (Soft Filters) ---
-    int score = 0;
-    int passThreshold = 60; // 60/100 points required to enter a trade
-    double emaGap = MathAbs(emaFast - emaSlow);
-
-    if (direction == POSITION_TYPE_BUY)
+    if ((emaFast < emaSlow) && (mid >= emaFast - (atrValue * 0.2)) && (mid <= emaSlow))
     {
-        // 1. Trend Direction & Gap (Max 30 pts)
-        if (emaFast > emaSlow) {
-            score += 15; // Basic uptrend
-            if (emaGap >= atrValue * 0.05) score += 15; // Strong gap confirmation
-        }
-
-        // 2. RSI Level & Momentum (Max 35 pts)
-        if (rsiValues[0] > 50.0) score += 20; // Core RSI level (Bullish)
-        if (rsiValues[0] > rsiValues[1]) score += 15; // RSI sloping up
-
-        // 3. Price Action Confirmation (Max 35 pts)
-        if (rates[1].close > rates[1].open) score += 15; // Bullish candle
-        if (rates[1].close > emaSlow) score += 20; // Price successfully crossed above Slow EMA
-
-        // Evaluation
-        if (score >= passThreshold) {
-            ctx.isValid = true;
-            ctx.reason = StringFormat("BUY SIGNAL: EMA uptrend + RSI=%.2f (Score: %d)", rsiValues[0], score);
-            Print(ctx.reason); // Explicit logging
-            return ctx;
-        } else {
-            ctx.reason = StringFormat("REJECT: BUY Score %d < %d", score, passThreshold);
-            return ctx;
-        }
+        signals[0].valid = true;
+        signals[0].direction = POSITION_TYPE_SELL;
+        signals[0].strength = 1.0;
     }
-    else // SELL
+
+    // --- STRATEGY 2: BREAKOUT (last X candle high/low) ---
+    ENUM_SESSION currentSession = GetCurrentSession();
+    if (currentSession == SESSION_LONDON || currentSession == SESSION_NEWYORK)
     {
-        // 1. Trend Direction & Gap (Max 30 pts)
-        if (emaFast < emaSlow) {
-            score += 15; // Basic downtrend
-            if (emaGap >= atrValue * 0.05) score += 15; // Strong gap confirmation
+        double highestHigh = 0;
+        double lowestLow = 999999;
+        for (int i = 1; i <= InpBreakoutCandles; i++)
+        {
+            if (rates[i].high > highestHigh) highestHigh = rates[i].high;
+            if (rates[i].low < lowestLow) lowestLow = rates[i].low;
         }
 
-        // 2. RSI Level & Momentum (Max 35 pts)
-        if (rsiValues[0] < 50.0) score += 20; // Core RSI level (Bearish)
-        if (rsiValues[0] < rsiValues[1]) score += 15; // RSI sloping down
+        MqlRates currentCandle[];
+        CopyRates(_Symbol, _Period, 0, 1, currentCandle);
+        double candleBody = MathAbs(currentCandle[0].close - currentCandle[0].open);
+        double candleRange = currentCandle[0].high - currentCandle[0].low;
+        bool isStrongCandle = (candleRange > 0 && (candleBody / candleRange) > 0.6);
 
-        // 3. Price Action Confirmation (Max 35 pts)
-        if (rates[1].close < rates[1].open) score += 15; // Bearish candle
-        if (rates[1].close < emaSlow) score += 20; // Price successfully crossed below Slow EMA
+        bool isAtrExpanding = atrValue > atrAvgValue * 1.2;
 
-        // Evaluation
-        if (score >= passThreshold) {
-            ctx.isValid = true;
-            ctx.reason = StringFormat("SELL SIGNAL: EMA downtrend + RSI=%.2f (Score: %d)", rsiValues[0], score);
-            Print(ctx.reason); // Explicit logging
-            return ctx;
-        } else {
-            ctx.reason = StringFormat("REJECT: SELL Score %d < %d", score, passThreshold);
-            return ctx;
+        if ((mid > highestHigh) && (highestHigh > 0))
+        {
+            signals[1].valid = true;
+            signals[1].direction = POSITION_TYPE_BUY;
+            signals[1].strength = 1.0;
+            if(isAtrExpanding && isStrongCandle)
+            {
+                signals[1].isStrong = true;
+            } else {
+                signals[1].isWeak = true;
+            }
+        }
+        if ((mid < lowestLow) && (lowestLow < 999999))
+        {
+            signals[1].valid = true;
+            signals[1].direction = POSITION_TYPE_SELL;
+            signals[1].strength = 1.0;
+            if(isAtrExpanding && isStrongCandle)
+            {
+                signals[1].isStrong = true;
+            } else {
+                signals[1].isWeak = true;
+            }
         }
     }
-    
-    return ctx;
+
+    // --- STRATEGY 3: REVERSAL (RSI extreme + engulfing) ---
+    bool bullEngulfing = (rates[2].close < rates[2].open) && (rates[1].close > rates[1].open) && 
+                         (rates[1].close >= rates[2].open) && (rates[1].open <= rates[2].close);
+    bool bearEngulfing = (rates[2].close > rates[2].open) && (rates[1].close < rates[1].open) && 
+                         (rates[1].close <= rates[2].open) && (rates[1].open >= rates[2].close);
+
+    if ((rsiValue < 30.0) && bullEngulfing)
+    {
+        signals[2].valid = true;
+        signals[2].direction = POSITION_TYPE_BUY;
+        signals[2].strength = 1.0;
+        signals[2].isWeak = true;
+    }
+    if ((rsiValue > 70.0) && bearEngulfing)
+    {
+        signals[2].valid = true;
+        signals[2].direction = POSITION_TYPE_SELL;
+        signals[2].strength = 1.0;
+        signals[2].isWeak = true;
+    }
+
+    // --- STRATEGY 4: LIQUIDITY SWEEP ---
+    StrategyContext liqCtx;
+    if (CheckLiquiditySweep(POSITION_TYPE_BUY, liqCtx))
+    {
+        signals[3].valid = true;
+        signals[3].direction = POSITION_TYPE_BUY;
+        signals[3].strength = 2.0; // Higher strength for override
+        signals[3].isStrong = true;
+        // If reversal is in the same direction, it's no longer weak
+        if(signals[2].valid && signals[2].direction == POSITION_TYPE_BUY)
+        {
+            signals[2].isWeak = false;
+        }
+    }
+    if (CheckLiquiditySweep(POSITION_TYPE_SELL, liqCtx))
+    {
+        signals[3].valid = true;
+        signals[3].direction = POSITION_TYPE_SELL;
+        signals[3].strength = 2.0; // Higher strength for override
+        signals[3].isStrong = true;
+        // If reversal is in the same direction, it's no longer weak
+        if(signals[2].valid && signals[2].direction == POSITION_TYPE_SELL)
+        {
+            signals[2].isWeak = false;
+        }
+    }
 }
 
 #endif // XAUUSD_M1_SCALPER_ENTRY_MQH

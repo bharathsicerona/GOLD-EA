@@ -1,6 +1,8 @@
 #ifndef XAUUSD_ADAPTIVE_RISK_MQH
 #define XAUUSD_ADAPTIVE_RISK_MQH
 
+#include "../Include/GoldEA_Unified_Risk.mqh"
+
 double CalculateLotSize(const double stopDistance,const double riskPercent)
   {
    if(stopDistance <= 0.0)
@@ -29,6 +31,7 @@ double CalculateLotSize(const double stopDistance,const double riskPercent)
 
    double rawLot = riskAmount / moneyPerLot;
    double finalLot = NormalizeVolume(rawLot);
+   finalLot = MathMax(finalLot, 0.01);
 
    double expectedLoss = finalLot * moneyPerLot;
    double actualRiskPercent = (expectedLoss / balance) * 100.0;

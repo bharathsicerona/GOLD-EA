@@ -31,19 +31,42 @@ The project is organized into a clean and modular structure to ensure clarity an
 
 This project includes three distinct Expert Advisors. Each has its own dedicated folder within the `EAs/` directory, containing the main `.mq5` file, any specific `.mqh` include files, and a detailed `README.md`.
 
-### 1. M5 Adaptive Multi-Factor EA
+### 1. M5 Adaptive Multi-Factor EA (Capital Stabilizer)
 
 -   **Folder:** `EAs/Adaptive/`
--   **Strategy:** A sophisticated multi-factor model that adapts to changing market conditions on the M5 timeframe. It dynamically selects from multiple sub-strategies (e.g., Trend, Range, Breakout) based on a scoring system.
--   **Risk Model:** Flexible, configurable risk management.
+-   **Role:** Capital Stabilizer (lower-frequency, higher-quality trades on M5).
+-   **Strategy:** A sophisticated multi-factor model that adapts to changing market conditions by selecting from several independent strategies based on the active trading session:
+    -   **`M5_RANGE` (Asian Session):** Buys on RSI < 35 with bullish candle, sells on RSI > 65 with bearish candle.
+    -   **`M5_BREAKOUT` (London Session):** Places pending orders to capture breakouts of the Asian session high/low.
+    -   **`M5_TREND_PULLBACK`:** Enters on pullbacks to the fast EMA in a confirmed trend.
+    -   **`M5_ATR_BREAKOUT` (London/NY):** Enters on high-momentum breakouts confirmed by ADX and ATR expansion.
+-   **Risk & Trade Management:**
+    -   Uses the shared `GoldEA_Unified_Risk.mqh` engine, with a special override for `0.01` lot trades to use a `$10` stop loss.
+    -   Features an advanced R-Multiple based trailing stop system to lock in profits at key thresholds (`1R`, `1.5R`, `2R`, `2.5R`).
 -   **More Info:** See the `EAs/Adaptive/README.md` for a full breakdown of the strategy and its parameters.
 
-### 2. M1 High-Risk Scalper EA
+### 2. M1 High-Risk Scalper EA (Capital Booster)
 
 -   **Folder:** `EAs/M1_Scalper/`
--   **Strategy:** An aggressive, high-frequency scalping strategy designed for the M1 timeframe. It aims to capture small, rapid price movements.
--   **Risk Model:** High-risk, high-reward model with features like monetary-based trailing stops.
+-   **Role:** Capital Booster (higher-frequency scalping on M1).
+-   **Strategy:** An aggressive, high-frequency scalping strategy that evaluates four independent entry models (EMA Pullback, Breakout, Reversal, and Liquidity Sweep) on each new bar. It uses a signal interaction engine to process the signals and decide on a final trade action based on a set of rules, including intelligent filtering of weak signals.
+    -   **`M1_EMA_PULLBACK`:** Enters on a price pullback to the EMA20 in a confirmed trend.
+    -   **`M1_BREAKOUT`:** A tick-level strategy that enters on price breaking recent highs/lows with ATR expansion and strong candle quality. Weak breakouts are filtered out.
+    -   **`M1_REVERSAL`:** Enters on extreme RSI levels combined with a strong engulfing candle pattern. Only considered if aligned with a liquidity sweep.
+    -   **`M1_LIQUIDITY_SWEEP`:** A new strategy that enters after a liquidity sweep, where the price takes out a previous high/low and then reverses. This signal has override priority.
+-   **Key Filters:**
+    -   Session restricted to London & New York.
+    -   Hard filters for minimum ATR and maximum spread.
+    -   Controls for trade frequency, including a 5-candle cooldown and a loss-cluster guard.
+-   **Risk & Trade Management:**
+    -   Uses the shared `GoldEA_Unified_Risk.mqh` engine: risk is capped at `$3` for `0.01` lot, `$6` for `0.02` lot, and `1%` of balance for larger trades.
+    -   Employs an aggressive R-based trailing stop to lock in profits and let runners continue (`1R -> BE`, `1.5R -> +0.5R`, `2R -> trail by 1R`).
+    -   Includes an in-trade `StrategyFeedbackManager` to dynamically manage open positions based on new signals.
 -   **More Info:** See the `EAs/M1_Scalper/README.md` for a detailed explanation of its aggressive profit-taking mechanisms.
+
+### M1 Adaptive Filter Layer
+
+The M1 Scalper now includes an Adaptive Filter Layer that runs before any strategies are evaluated. This layer analyzes the current market conditions and prevents trades when the environment is unfavorable, which improves win rates and reduces overtrading. The filters include checks for dynamic ATR, trend strength, chop, candle quality, and session-specific conditions. For more details, see the [M1 Filter Layer Documentation](docs/M1_FILTER_LAYER.md).
 
 ### 3. Beginner Trend Pullback EA
 
@@ -74,7 +97,15 @@ This project includes three distinct Expert Advisors. Each has its own dedicated
 
 ## Log Analysis with Python
 
-The project includes a powerful Python script to analyze the standardized log files produced by the EAs.
+The project includes a powerful Python script (`scripts/analyze_ea_logs.py`) to parse and analyze the standardized log files produced by the EAs. It provides deep insights into EA performance beyond what the MT5 tester offers.
+
+### Key Features
+
+-   **Performance Summary:** Generates a detailed console report with key metrics like win rate, total trades, and profitability for each EA.
+-   **Advanced Analytics:** Calculates R-multiples, win rates per session (Asian, London, New York), and performance for BUY vs. SELL trades.
+-   **Rejection Analysis:** Identifies and counts the top reasons trades were skipped (e.g., `HIGH_SPREAD`, `COOLDOWN_ACTIVE`).
+-   **Trade Lifecycle Tracking:** Reconstructs the full lifecycle of each trade from entry to exit, ensuring accurate accounting.
+-   **Automated Exports:** Automatically saves structured data (`events.csv`, `summary.csv`, `data.json`) to the `log_analysis_output/` directory for further analysis in tools like Excel or Pandas.
 
 ### Requirements
 
@@ -94,3 +125,24 @@ The project includes a powerful Python script to analyze the standardized log fi
 4.  **View Results:**
     -   A detailed summary will be printed to the console.
     -   Structured output files (`events.csv`, `summary.csv`, `data.json`) will be automatically saved to the `log_analysis_output/` directory for further analysis in tools like Excel or Pandas.
+
+## Logging System
+
+- Structured logging format is implemented for both EAs:
+  - `[M1_SCALPER][GoldEA][TYPE] ...`
+  - `[M5][GoldEA][TYPE] ...`
+- Standard log types:
+  - `CHECK` for signal evaluation
+  - `EXECUTION` for order placement
+  - `REJECTION` for skipped/blocked trades with explicit reason
+  - `RESULT` for SL/TP/BE lifecycle events
+  - `STATS` for periodic internal counter snapshots
+- Trade lifecycle is fully logged with `tradeId`, `score`, `atr`, `spread`, and `reason` fields.
+- Logs are aligned with `scripts/analyze_ea_logs.py` expectations (`M1_SCALPER` / `M5` prefixes and `BUY|SELL check:` + `BUY|SELL executed:` patterns).
+- M1 check log format now dynamically includes the strategy name:
+  - `[M1_SCALPER][GoldEA][CHECK] [M1_BREAKOUT] BUY check: rsi=... ema20=... ema50=... score=... atr=... spread=... decision=... reason=...`
+  - Same structure for `SELL check`.
+- M1 execution/result log formats:
+  - `[M1_SCALPER][GoldEA][EXECUTION] BUY executed: tradeId=... lot=... entry=... sl=... tp=...`
+  - `[M1_SCALPER][GoldEA][RESULT] STOP_LOSS_HIT tradeId=... profit=...`
+  - `[M1_SCALPER][GoldEA][RESULT] TAKE_PROFIT_HIT tradeId=... profit=...`

@@ -27,8 +27,8 @@ input string           InpTradeSymbol            = "XAUUSDm";
 input ENUM_TIMEFRAMES  InpTimeframe              = PERIOD_M5;
 input ulong            InpMagicNumber            = 26032026;
 
-input int              InpFastEmaPeriod          = 21;
-input int              InpSlowEmaPeriod          = 100;
+input int              InpFastEmaPeriod          = 20;
+input int              InpSlowEmaPeriod          = 50;
 input int              InpRsiPeriod              = 14;
 input int              InpAtrPeriod              = 14;
 
@@ -43,6 +43,7 @@ input double           InpRsiSellMax             = 48.0;
 
 input double           InpRiskPercent            = 1.0;
 input double           InpMaxAbsoluteRiskPercent = 10.0;
+input bool             InpUseDynamicLotSizing    = false; // Intentionally disabled by default (0.01 fixed phase)
 input bool             InpAllowCounterTrend      = true;
 input double           InpCounterTrendRisk       = 0.50;
 input int              InpCounterTrendMinScore   = 85;
@@ -79,8 +80,14 @@ input int              InpLondonEndHour          = 13;
 input int              InpNewYorkStartHour       = 13;
 input int              InpNewYorkEndHour         = 22;
 
+//--- Session Strategies
+input double           InpRangeProximityFactor   = 0.5;  // ATR multiplier for Asian range proximity
+input double           InpRangeRsiBuyMax         = 40.0; // Max RSI for Asian range buy
+input double           InpRangeRsiSellMin        = 60.0; // Min RSI for Asian range sell
+input double           InpBreakoutCandleFactor   = 0.7;  // ATR multiplier for London breakout candle size
+
 input ENUM_SCORE_MODE  InpUseScoring             = SCORE_ENABLED;
-input int              InpMinimumScore           = 75;
+input int              InpMinimumScore           = 80;
 input int              InpWeightTrend            = 30;
 input int              InpWeightEmaAlignment     = 25;
 input int              InpWeightRsi              = 20;

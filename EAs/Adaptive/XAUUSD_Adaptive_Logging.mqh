@@ -1,6 +1,7 @@
 #ifndef XAUUSD_ADAPTIVE_LOGGING_MQH
 #define XAUUSD_ADAPTIVE_LOGGING_MQH
 
+extern string EA_TYPE;
 string g_dashboardPrefix  = "GoldEA_Dash_";
 
 void CleanupOldLogs()
@@ -63,7 +64,7 @@ void UpdateDashboard(const DecisionContext &context)
    if(context.decision == "BUY") decisionColor = clrLimeGreen;
    else if(context.decision == "SELL") decisionColor = clrTomato;
 
-   SetDashboardLine("Title","Gold EA Dashboard",clrWhite,0);
+   SetDashboardLine("Title",StringFormat("GOLD EA %s Dashboard",EA_TYPE),clrWhite,0);
    SetDashboardLine("Session",StringFormat("Session        : %s [%s]",context.sessionName,context.status),statusColor,1);
    SetDashboardLine("Strategy",StringFormat("Strategy       : %s (Risk: %.1f%%)",context.strategyName,context.riskPercent),clrPlum,2);
    SetDashboardLine("ATR",StringFormat("ATR            : %.2f",context.atr),clrKhaki,3);

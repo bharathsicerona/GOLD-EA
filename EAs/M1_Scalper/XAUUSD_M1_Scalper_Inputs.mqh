@@ -38,12 +38,14 @@ input int              InpAtrPeriod              = 14;      // ATR Period
 
 // --- Entry Filters ---
 #property group "--- Entry Filters ---"
+input int              InpBreakoutCandles        = 10;      // Lookback candles for breakout strategy
 input double           InpRsiBuyMin              = 50.0;
 input double           InpRsiBuyMax              = 70.0;
 input double           InpRsiSellMin             = 30.0;
 input double           InpRsiSellMax             = 50.0;
 input double           InpMinAtrPoints           = 250.0;   // Min ATR points to trade (Noise Filter)
-input double           InpMinEmaGapPoints        = 20.0;    // Min gap between EMA20 and EMA50
+input double           InpMinAtrValue            = 2.0;     // Min ATR value filter for entry quality
+input double           InpMinEmaGapPoints        = 35.0;    // Min EMA20-EMA50 gap (trend strength filter)
 input double           InpPullbackAtrFactor      = 0.50;    // Max distance from EMA20 for pullback
 input double           InpSpikeCandleAtrFactor   = 3.0;     // ATR factor to detect and avoid spike candles
 
@@ -52,6 +54,7 @@ input double           InpSpikeCandleAtrFactor   = 3.0;     // ATR factor to det
 input int              InpMaxSpreadPoints        = 300;     // Max Spread Cap (Points) - Tightened
 input int              InpCooldownAfterLoss      = 90;      // Cooldown after a losing trade (Seconds)
 input int              InpMaxConsecutiveLosses   = 0;       // Stop after N losses (0=disabled)
+input int              InpEntryCooldownCandles   = 5;       // Bar-based cooldown between entries
 
 // --- Visual & Logging ---
 #property group "--- Visual & Logging ---"
@@ -64,6 +67,8 @@ input int              InpNewYorkEndHour         = 22;
 
 input bool             InpEnableDebugPrints      = true;
 input bool             InpEnableCSVLogging       = true;
+input bool             InpEnableDashboard        = true;    // Enable the on-chart dashboard
+input int              InpMinimumScore           = 7;       // Minimum score to highlight on dashboard
 
 #property group "" // Reset group
 
