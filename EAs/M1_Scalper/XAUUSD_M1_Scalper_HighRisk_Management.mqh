@@ -18,10 +18,12 @@ double ProfitToPrice(const double profitInCurrency, const string symbol, const d
 }
 
 //+------------------------------------------------------------------+
-//| 1. Dynamic Step-Based Trailing Stop                              |
+//| 1. R-based trailing stop                                          |
 //+------------------------------------------------------------------+
-// This function implements the aggressive profit-locking trailing stop.
-// It moves the SL to predefined profit levels as the trade becomes more profitable.
+// [NEW SYSTEM] Runner logic:
+// - >1R  : move SL to breakeven
+// - >1.5R: lock +0.5R
+// - >2R  : trail by 1R from current price
 void ManageTrailingStop(const ulong ticket, const double profit)
 {
     if (ticket == 0)
@@ -33,54 +35,44 @@ void ManageTrailingStop(const ulong ticket, const double profit)
     double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
     double currentSL = PositionGetDouble(POSITION_SL);
     double currentTP = PositionGetDouble(POSITION_TP);
-    // Advanced dynamic trailing:
-    // 1) No trailing zone: profit < 1.5
-    // 2) Initial protection: 1.5 -> +0.5, 2.0 -> +1.0
-    // 3) Core trailing (3..10): lock = profit_level - 1 (integer levels only)
-    // 4) Runner mode (12+): lock = profit_level - 2 (integer levels only)
-    if (profit < 1.5)
+    double initialRisk = 0.0;
+    if (!g_initialRiskMap.TryGetValue(ticket, initialRisk) || initialRisk <= 0.0)
+        return;
+    double rMultiple = profit / initialRisk;
+    if (rMultiple <= 1.0)
         return;
 
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    double lockPriceDistance = ProfitToPrice(initialRisk, _Symbol, volume, type);
+    double riskPriceDistance = lockPriceDistance;
+    if (riskPriceDistance <= 0.0)
+        return;
+
+    double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+    double lockSL = currentSL;
     int desiredLevel = 0;
-    double targetLockUsd = 0.0;
-    if (profit >= 12.0)
+    if (rMultiple > 2.0)
     {
-        desiredLevel = (int)MathFloor(profit);
-        targetLockUsd = (double)desiredLevel - 2.0;
+        desiredLevel = 3;
+        lockSL = (type == POSITION_TYPE_BUY) ? (currentPrice - riskPriceDistance) : (currentPrice + riskPriceDistance);
     }
-    else if (profit >= 3.0)
-    {
-        desiredLevel = (int)MathFloor(profit);
-        targetLockUsd = (double)desiredLevel - 1.0;
-    }
-    else if (profit >= 2.0)
+    else if (rMultiple > 1.5)
     {
         desiredLevel = 2;
-        targetLockUsd = 1.0;
+        lockSL = (type == POSITION_TYPE_BUY) ? (openPrice + riskPriceDistance * 0.5) : (openPrice - riskPriceDistance * 0.5);
     }
     else
     {
         desiredLevel = 1;
-        targetLockUsd = 0.5;
+        lockSL = openPrice;
     }
 
-    if (targetLockUsd <= 0.0)
-        return;
-
-    // Update per crossed level only.
     string trailLevelKey = BuildStateKey("m1traillevel", ticket);
     int lastAppliedLevel = 0;
     if (GlobalVariableCheck(trailLevelKey))
         lastAppliedLevel = (int)GlobalVariableGet(trailLevelKey);
-    if (desiredLevel <= lastAppliedLevel)
+    if (desiredLevel < lastAppliedLevel)
         return;
-
-    double volume = PositionGetDouble(POSITION_VOLUME);
-    double lockPriceDistance = ProfitToPrice(targetLockUsd, _Symbol, volume, type);
-    if (lockPriceDistance <= 0.0)
-        return;
-
-    double lockSL = (type == POSITION_TYPE_BUY) ? (openPrice + lockPriceDistance) : (openPrice - lockPriceDistance);
 
     bool needsLock = false;
     if (type == POSITION_TYPE_BUY)
@@ -96,7 +88,7 @@ void ManageTrailingStop(const ulong ticket, const double profit)
     if (trade.PositionModify(ticket, lockSL, currentTP))
     {
         GlobalVariableSet(trailLevelKey, (double)desiredLevel);
-        Log(StringFormat("PROFIT_LOCK_APPLIED: ticket=%I64u profit=%.2f lock=%.2f sl=%.2f", ticket, profit, targetLockUsd, lockSL));
+        Log(StringFormat("PROFIT_LOCK_APPLIED: ticket=%I64u r=%.2f level=%d sl=%.2f", ticket, rMultiple, desiredLevel, lockSL));
     }
 }
 
@@ -108,6 +100,9 @@ void ManageTrailingStop(const ulong ticket, const double profit)
 // multiples of its initial risk (R).
 void UpdateDynamicTP(const ulong ticket, const double profit, const double initialRiskInCurrency)
 {
+    // [NEW SYSTEM] Keep structured fixed TP from entry; skip dynamic TP rewrite.
+    if (PositionSelectByTicket(ticket) && PositionGetDouble(POSITION_TP) > 0.0)
+        return;
     if (initialRiskInCurrency <= 0) return;
 
     // Calculate current profit in R-multiples

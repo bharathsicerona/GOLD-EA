@@ -36,9 +36,22 @@ string NormalizeRejectReason(const string rawReason)
 {
    string u = rawReason;
    StringToUpper(u);
+   if(StringFind(u, "LOW_ATR_DYNAMIC") >= 0) return "LOW_ATR_DYNAMIC";
+   if(StringFind(u, "WEAK_TREND") >= 0) return "WEAK_TREND";
+   if(StringFind(u, "CHOP_MARKET_DYNAMIC") >= 0) return "CHOP_MARKET_DYNAMIC";
+   if(StringFind(u, "WEAK_CANDLE_DYNAMIC") >= 0) return "WEAK_CANDLE_DYNAMIC";
+   if(StringFind(u, "WEAK_BREAKOUT_DYNAMIC") >= 0) return "WEAK_BREAKOUT_DYNAMIC";
+   if(StringFind(u, "NY_WEAK_CONDITION") >= 0) return "NY_WEAK_CONDITION";
+   if(StringFind(u, "WEAK_BREAKOUT_REJECTED") >= 0) return "WEAK_BREAKOUT_REJECTED";
    if(StringFind(u, "CORE_CONDITION_FAIL") >= 0) return "CORE_CONDITION_FAIL";
    if(StringFind(u, "TREND_WEAK") >= 0) return "TREND_WEAK";
    if(StringFind(u, "MOMENTUM_WEAK") >= 0) return "MOMENTUM_WEAK";
+   if(StringFind(u, "SCORE_TOO_LOW") >= 0) return "SCORE_TOO_LOW";
+   if(StringFind(u, "DIRECTION_CONFLICT") >= 0) return "DIRECTION_CONFLICT";
+   if(StringFind(u, "NO_BREAKOUT") >= 0) return "NO_BREAKOUT";
+   if(StringFind(u, "EARLY_NOISE") >= 0) return "EARLY_NOISE";
+   if(StringFind(u, "M5_TREND_BLOCK") >= 0) return "M5_TREND_BLOCK";
+   if(StringFind(u, "SELL_DISABLED_DEBUG") >= 0) return "SELL_DISABLED_DEBUG";
    if(StringFind(u, "LOW_ATR") >= 0) return "LOW_ATR";
    if(StringFind(u, "LOSS_CLUSTER_COOLDOWN") >= 0) return "LOSS_CLUSTER_COOLDOWN";
    if(StringFind(u, "EMA_FLAT") >= 0) return "EMA_FLAT";
@@ -158,17 +171,21 @@ bool IsCooldownActive()
 //+------------------------------------------------------------------+
 //| ExecuteHighRiskTrade - New Trade Execution Logic                 |
 //+------------------------------------------------------------------+
-void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction)
+void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction, const string strategyName)
 {
     // --- 1. Get Entry Price ---
     double entryPrice = (direction == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
     // --- 2. Define Initial Trade Parameters ---
     double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-    double lotSize = 0.02; // Base lot for M1. Small accounts are forced to 0.01 below.
-    lotSize = AdjustLotForM1(lotSize, balance);
-    // Simplified M1 scalping exits: fixed monetary SL + profit-lock management
-    const double slUsd = 2.0;
+    double lotSize = 0.01;
+    // [NEW SYSTEM] ATR-based SL/TP model
+    double atrValue = 0.0;
+    if (!GetIndicatorValue(g_atrHandle, 0, atrValue) || atrValue <= 0.0)
+    {
+        LogRejection((direction == POSITION_TYPE_BUY) ? "BUY" : "SELL", "LOW_ATR", lotSize);
+        return;
+    }
     double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
     double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
     if (tickSize <= 0.0 || tickValue <= 0.0 || lotSize <= 0.0)
@@ -177,15 +194,19 @@ void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction)
         return;
     }
 
-    double slDistance = (slUsd * tickSize) / (tickValue * lotSize);
+    double slDistance = atrValue * 0.8; // [NEW SYSTEM]
+    if (slDistance < 2.0) slDistance = 2.0; // [NEW SYSTEM]
+    if (slDistance > 5.0) slDistance = 5.0; // [NEW SYSTEM]
+    double tpDistance = slDistance * 1.5; // [NEW SYSTEM]
     double minStopDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
     if (minStopDist > 0.0)
     {
         slDistance = MathMax(slDistance, minStopDist);
+        tpDistance = MathMax(tpDistance, minStopDist);
     }
 
     double slPrice = (direction == POSITION_TYPE_BUY) ? (entryPrice - slDistance) : (entryPrice + slDistance);
-    double tpPrice = 0.0; // No fixed TP; profit-lock/breakeven logic manages exits.
+    double tpPrice = (direction == POSITION_TYPE_BUY) ? (entryPrice + tpDistance) : (entryPrice - tpDistance); // [NEW SYSTEM]
     double finalSlDistance = MathAbs(entryPrice - slPrice);
 
     // Final normalization after all calculations
@@ -210,9 +231,8 @@ void ExecuteHighRiskTrade(const ENUM_POSITION_TYPE direction)
     if (trade.PositionOpen(_Symbol, orderType, lotSize, entryPrice, slPrice, tpPrice)) {
         ulong ticket = trade.ResultDeal();
         totalTrades++;
-        int signalScore = (direction == POSITION_TYPE_BUY) ? g_lastBuyScore : g_lastSellScore;
-        LogTyped("EXECUTION", StringFormat("%s executed: tradeId=%I64u lot=%.2f entry=%.2f sl=%.2f tp=%.2f score=%d",
-                 (direction == POSITION_TYPE_BUY ? "BUY" : "SELL"), ticket, lotSize, entryPrice, slPrice, tpPrice, signalScore));
+        LogTyped("EXECUTION", StringFormat("%s executed: tradeId=%I64u lot=%.2f entry=%.2f sl=%.2f tp=%.2f strategy=%s",
+                 (direction == POSITION_TYPE_BUY ? "BUY" : "SELL"), ticket, lotSize, entryPrice, slPrice, tpPrice, strategyName));
 
         // --- 8. Store Initial Risk ---
         if (ticket > 0) {
@@ -368,17 +388,274 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
     }
 }
 
+
+//+------------------------------------------------------------------+
+//| StrategyFeedbackManager - In-trade Signal Management             |
+//+------------------------------------------------------------------+
+void StrategyFeedbackManager(StrategySignal &signals[])
+{
+    if (!PositionSelect(_Symbol)) return;
+
+    long positionType = PositionGetInteger(POSITION_TYPE);
+    double positionProfit = PositionGetDouble(POSITION_PROFIT);
+    ulong ticket = PositionGetInteger(POSITION_TICKET);
+
+    bool hasNewSameDirectionSignal = false;
+    bool hasNewOppositeDirectionSignal = false;
+    bool hasOppositeLiquiditySweep = false;
+
+    for (int i = 0; i < ArraySize(signals); i++)
+    {
+        if (signals[i].valid)
+        {
+            if (signals[i].direction == positionType)
+            {
+                hasNewSameDirectionSignal = true;
+            }
+            else
+            {
+                hasNewOppositeDirectionSignal = true;
+                if (signals[i].name == "M1_LIQUIDITY_SWEEP")
+                {
+                    hasOppositeLiquiditySweep = true;
+                }
+            }
+        }
+    }
+
+    // CRITICAL RULE — SWEEP AGAINST TRADE
+    if (hasOppositeLiquiditySweep)
+    {
+        LogTyped("SWEEP_OVERRIDE_EXIT", "Immediate exit due to opposite liquidity sweep. Ticket: " + (string)ticket);
+        trade.PositionClose(ticket);
+        return;
+    }
+
+    // SAME DIRECTION SIGNAL
+    if (hasNewSameDirectionSignal)
+    {
+        double initialRisk = 0;
+        g_initialRiskMap.TryGetValue(ticket, initialRisk);
+        if(initialRisk > 0)
+        {
+            LogTyped("TP_EXTENDED", "TP extended due to new same-direction signal. Ticket: " + (string)ticket);
+            ExtendTakeProfit(ticket, initialRisk);
+        }
+    }
+    // OPPOSITE SIGNAL
+    else if (hasNewOppositeDirectionSignal)
+    {
+        if (positionProfit > 0)
+        {
+            LogTyped("EARLY_EXIT_CONFLICT", "Early exit with profit due to new opposite signal. Ticket: " + (string)ticket);
+            trade.PositionClose(ticket);
+        }
+        else
+        {
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double newSL = openPrice; // Breakeven
+            
+            if(positionType == POSITION_TYPE_BUY && currentSL < newSL)
+            {
+                LogTyped("SL_TIGHTENED", "SL tightened to breakeven due to new opposite signal. Ticket: " + (string)ticket);
+                trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+            }
+            else if (positionType == POSITION_TYPE_SELL && currentSL > newSL)
+            {
+                LogTyped("SL_TIGHTENED", "SL tightened to breakeven due to new opposite signal. Ticket: " + (string)ticket);
+                trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ProcessStrategySignals - Signal Interaction Engine               |
+//+------------------------------------------------------------------+
+void ProcessStrategySignals(StrategySignal &signals[], int totalSignals, int &finalDirection, string &decisionType, double &confidenceLevel, string &primaryStrategyName)
+{
+    finalDirection = -1;
+    decisionType = "REJECT";
+    confidenceLevel = 0.0;
+    primaryStrategyName = "NONE";
+
+    StrategySignal sweepSignal;
+    bool hasSweep = false;
+    StrategySignal breakoutSignal;
+    bool hasBreakout = false;
+    StrategySignal pullbackSignal;
+    bool hasPullback = false;
+    StrategySignal reversalSignal;
+    bool hasReversal = false;
+
+    int buySignalCount = 0;
+    int sellSignalCount = 0;
+
+    for (int i = 0; i < totalSignals; i++)
+    {
+        if (signals[i].valid)
+        {
+            if(signals[i].direction == POSITION_TYPE_BUY) buySignalCount++;
+            if(signals[i].direction == POSITION_TYPE_SELL) sellSignalCount++;
+
+            if (signals[i].name == "M1_LIQUIDITY_SWEEP")
+            {
+                hasSweep = true;
+                sweepSignal = signals[i];
+            }
+            else if (signals[i].name == "M1_BREAKOUT")
+            {
+                hasBreakout = true;
+                breakoutSignal = signals[i];
+            }
+            else if (signals[i].name == "M1_EMA_PULLBACK")
+            {
+                hasPullback = true;
+                pullbackSignal = signals[i];
+            }
+            else if (signals[i].name == "M1_REVERSAL")
+            {
+                hasReversal = true;
+                reversalSignal = signals[i];
+            }
+        }
+    }
+    
+    // PRIORITY 6: CONFLICT
+    if (buySignalCount > 0 && sellSignalCount > 0)
+    {
+        decisionType = "DIRECTION_CONFLICT";
+        return;
+    }
+
+    // PRIORITY 1: LIQUIDITY SWEEP
+    if (hasSweep)
+    {
+        finalDirection = sweepSignal.direction;
+        decisionType = "SWEEP_OVERRIDE";
+        confidenceLevel = 2.0;
+        primaryStrategyName = sweepSignal.name;
+        LogTyped("SIGNAL_SUMMARY", "SWEEP_OVERRIDE. Strategy: " + primaryStrategyName);
+        return;
+    }
+
+    // PRIORITY 5: REVERSAL (only with sweep)
+    if (hasReversal && !hasSweep)
+    {
+        // Ignore reversal signals unless they are aligned with a sweep
+        if (reversalSignal.isWeak) return;
+    }
+
+    // PRIORITY 2: ALIGNMENT
+    if (hasBreakout && hasPullback && breakoutSignal.direction == pullbackSignal.direction)
+    {
+        finalDirection = breakoutSignal.direction;
+        decisionType = "ALIGNMENT";
+        confidenceLevel = 1.5;
+        primaryStrategyName = breakoutSignal.name + "," + pullbackSignal.name;
+        LogTyped("SIGNAL_SUMMARY", "ALIGNMENT signal. Strategies: " + primaryStrategyName);
+        return;
+    }
+
+    // PRIORITY 3: BREAKOUT ONLY
+    if (hasBreakout && !hasPullback && !hasReversal)
+    {
+        if (breakoutSignal.isStrong)
+        {
+            finalDirection = breakoutSignal.direction;
+            decisionType = "STRONG_BREAKOUT";
+            confidenceLevel = 1.0;
+            primaryStrategyName = breakoutSignal.name;
+            LogTyped("SIGNAL_SUMMARY", "STRONG_BREAKOUT signal. Strategy: " + primaryStrategyName);
+        }
+        else
+        {
+            decisionType = "WEAK_BREAKOUT_REJECTED";
+            LogTyped("SIGNAL_SUMMARY", "Weak breakout rejected.");
+        }
+        return;
+    }
+
+    // PRIORITY 4: PULLBACK ONLY
+    if (hasPullback && !hasBreakout && !hasReversal)
+    {
+        finalDirection = pullbackSignal.direction;
+        decisionType = "PULLBACK_ONLY";
+        confidenceLevel = 1.0;
+        primaryStrategyName = pullbackSignal.name;
+        LogTyped("SIGNAL_SUMMARY", "PULLBACK_ONLY signal. Strategy: " + primaryStrategyName);
+        return;
+    }
+}
+
+int GetDynamicCooldownCandles(bool &chopDetected)
+{
+    int cooldownCandles = InpEntryCooldownCandles; // Default
+    chopDetected = false;
+
+    if(g_consecutiveLosses == 1)
+    {
+        cooldownCandles = 3;
+    }
+    else if(g_consecutiveLosses >= 2)
+    {
+        cooldownCandles = 5;
+    }
+
+    // Chop detection
+    double atr;
+    GetIndicatorValue(g_atrHandle, 1, atr);
+    MqlRates rates[];
+    if (CopyRates(_Symbol, _Period, 0, 5, rates) == 5)
+    {
+        double high5 = rates[0].high;
+        double low5 = rates[0].low;
+        for(int i = 1; i < 5; i++)
+        {
+            if(rates[i].high > high5) high5 = rates[i].high;
+            if(rates[i].low < low5) low5 = rates[i].low;
+        }
+        double range5 = high5 - low5;
+        if(range5 < atr * 1.2)
+        {
+            chopDetected = true;
+            cooldownCandles = MathMax(cooldownCandles, 7); // increase cooldown in chop
+        }
+    }
+    
+    return cooldownCandles;
+}
+
+void LogSignals(StrategySignal &signals[])
+{
+    for(int i = 0; i < ArraySize(signals); i++)
+    {
+        if(signals[i].valid)
+        {
+            string side = (signals[i].direction == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+            LogTyped("CHECK", StringFormat("[%s] %s check: decision=VALID reason=VALID strategy=%s",
+                                           signals[i].name, side, signals[i].name));
+        }
+    }
+}
+
 //+------------------------------------------------------------------+
 //| OnTick: Main EA Logic                                            |
 //+------------------------------------------------------------------+
 void OnTick()
 {
     EvaluateTickAndDashboard();
+
     // --- 1. Manage Existing Position ---
     if (HasOpenPosition())
     {
         if (PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
         {
+            StrategySignal signals[];
+            ValidateEntry(signals);
+            StrategyFeedbackManager(signals);
+
             ulong ticket = PositionGetInteger(POSITION_TICKET);
             double profit = PositionGetDouble(POSITION_PROFIT);
             double initialRisk = 0;
@@ -391,15 +668,57 @@ void OnTick()
                 ExtendTakeProfit(ticket, initialRisk);
             }
         }
-        return; // Do not look for new trades if one is open
+        return;
     }
 
-    // Evaluate entry signals only on a new M1 candle
+    // --- 2. Check for New Trade Opportunities ---
+    bool isNewBar = false;
     static datetime lastSignalEvalBar = 0;
     datetime currentSignalBar = iTime(_Symbol, PERIOD_M1, 0);
-    if (currentSignalBar == lastSignalEvalBar)
+    if (currentSignalBar != lastSignalEvalBar)
+    {
+        isNewBar = true;
+        lastSignalEvalBar = currentSignalBar;
+    }
+
+    if(!isNewBar) return;
+
+    // --- Prevent Trade Clusters ---
+    if(g_lastTradeBarTime > 0 && (currentSignalBar - g_lastTradeBarTime) < 120) // 2 candles * 60 seconds
+    {
+        LogRejection("BOTH", "COOLDOWN_ACTIVE", 0.0);
         return;
-    lastSignalEvalBar = currentSignalBar;
+    }
+
+    // --- Dynamic Cooldown and Adaptive Filter ---
+    bool chopDetected = false;
+    int dynamicCooldown = GetDynamicCooldownCandles(chopDetected);
+
+    string filterReason = "";
+    double atr, emaFast, emaSlow;
+    GetIndicatorValue(g_atrHandle, 1, atr);
+    GetIndicatorValue(g_ema20Handle, 1, emaFast);
+    GetIndicatorValue(g_ema50Handle, 1, emaSlow);
+
+    if (chopDetected) {
+        if (g_lastTradeBarTime > 0) {
+            int barsSinceLastTrade = iBarShift(_Symbol, PERIOD_M1, g_lastTradeBarTime, false);
+            if (barsSinceLastTrade >= 0 && barsSinceLastTrade < dynamicCooldown) {
+                LogRejection("BOTH", "COOLDOWN_ACTIVE_CHOP", 0.0);
+                return;
+            }
+        }
+    }
+    else if(!AdaptiveFilterCheck(filterReason, atr, emaFast, emaSlow, false))
+    {
+        LogRejection("BOTH", filterReason, 0.0);
+        return;
+    }
+    
+    // Evaluate signals on every tick
+    StrategySignal signals[];
+    ValidateEntry(signals);
+    LogSignals(signals);
 
     if (g_skipSignalsRemaining > 0)
     {
@@ -408,25 +727,17 @@ void OnTick()
         return;
     }
 
-    // --- 2. Check for New Trade Opportunities ---
-    
     // Cooldown after loss check
     if(IsCooldownActive()) {
         LogRejection("BOTH", "COOLDOWN_ACTIVE", 0.0);
         return;
     }
-
-    // Unified 20-second cooldown after ANY trade closes to prevent extreme overtrading but maintain frequency
-    if (TimeCurrent() - g_lastCloseTime < 20) {
-        LogRejection("BOTH", "COOLDOWN_ACTIVE", 0.0);
-        return;
-    }
-
+    
     // Safety: bar-based cooldown after last executed trade
     if (g_lastTradeBarTime > 0) {
         int barsSinceLastTrade = iBarShift(_Symbol, PERIOD_M1, g_lastTradeBarTime, false);
-        if (barsSinceLastTrade >= 0 && barsSinceLastTrade < InpEntryCooldownCandles) {
-            LogRejection("BOTH", "COOLDOWN_5CANDLE", 0.0);
+        if (barsSinceLastTrade >= 0 && barsSinceLastTrade < dynamicCooldown) {
+            LogRejection("BOTH", "COOLDOWN_ACTIVE", 0.0);
             return;
         }
     }
@@ -449,47 +760,22 @@ void OnTick()
         LogRejection("BOTH", "MAX_TRADES_REACHED", 0.0);
         return; // Prevent extreme overtrading bursts
     }
-    
-    // Check for BUY signal
-    EntryContext buyContext = ValidateEntry(POSITION_TYPE_BUY);
-    totalSignals++;
-    string buyReasonCode = NormalizeRejectReason(buyContext.reason);
-    LogTyped("CHECK", StringFormat("[M1_PA] BUY check: rsi=%.2f ema20=%.2f ema50=%.2f score=%d atr=%.5f spread=%d decision=%s reason=%s",
-                                   buyContext.rsi, buyContext.emaFast, buyContext.emaSlow,
-                                   buyContext.score, buyContext.atr, (int)buyContext.spread,
-                                   (buyContext.isValid ? "VALID" : "SKIPPED"), buyReasonCode));
-    if (buyContext.isValid) {
-        g_lastBuyScore = buyContext.score;
-        ExecuteHighRiskTrade(POSITION_TYPE_BUY);
-        return;
-    } else {
-        static datetime lastBuyRejectTime = 0;
-        datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
-        if (lastBuyRejectTime != currentBarTime) {
-            LogRejection("BUY", buyReasonCode, 0.0);
-            lastBuyRejectTime = currentBarTime;
-        }
-    }
 
-    // Check for SELL signal
-    EntryContext sellContext = ValidateEntry(POSITION_TYPE_SELL);
-    totalSignals++;
-    string sellReasonCode = NormalizeRejectReason(sellContext.reason);
-    LogTyped("CHECK", StringFormat("[M1_PA] SELL check: rsi=%.2f ema20=%.2f ema50=%.2f score=%d atr=%.5f spread=%d decision=%s reason=%s",
-                                   sellContext.rsi, sellContext.emaFast, sellContext.emaSlow,
-                                   sellContext.score, sellContext.atr, (int)sellContext.spread,
-                                   (sellContext.isValid ? "VALID" : "SKIPPED"), sellReasonCode));
-    if (sellContext.isValid) {
-        g_lastSellScore = sellContext.score;
-        ExecuteHighRiskTrade(POSITION_TYPE_SELL);
-        return;
-    } else {
-        static datetime lastSellRejectTime = 0;
-        datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
-        if (lastSellRejectTime != currentBarTime) {
-            LogRejection("SELL", sellReasonCode, 0.0);
-            lastSellRejectTime = currentBarTime;
-        }
+    // Process signals
+    int finalDirection = -1;
+    double confidenceLevel = 0.0;
+    string primaryStrategyName = "NONE";
+    string decisionType = "REJECT";
+    ProcessStrategySignals(signals, ArraySize(signals), finalDirection, decisionType, confidenceLevel, primaryStrategyName);
+
+    if (finalDirection != -1)
+    {
+        totalSignals++;
+        ExecuteHighRiskTrade((ENUM_POSITION_TYPE)finalDirection, primaryStrategyName);
+    }
+    else
+    {
+        LogRejection("BOTH", decisionType, 0.0);
     }
 }
 

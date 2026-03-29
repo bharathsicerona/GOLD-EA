@@ -38,6 +38,7 @@ input int              InpAtrPeriod              = 14;      // ATR Period
 
 // --- Entry Filters ---
 #property group "--- Entry Filters ---"
+input int              InpBreakoutCandles        = 10;      // Lookback candles for breakout strategy
 input double           InpRsiBuyMin              = 50.0;
 input double           InpRsiBuyMax              = 70.0;
 input double           InpRsiSellMin             = 30.0;

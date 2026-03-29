@@ -49,7 +49,7 @@ The following list includes all files currently present in the project workspace
 | M1 main | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` | M1 EA bootstrap + execution orchestration | MT5 runtime |
 | M1 inputs | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh` | High-risk mode, session mode, filters, visualization params | M1 main/modules |
 | M1 indicators | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Indicators.mqh` | Placeholder/empty module | M1 include chain (legacy) |
-| M1 entry | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | EMA20 pullback + candle-direction entry validator (`ValidateEntry`) | M1 main |
+| M1 entry | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | Scoring-based EMA/ATR entry validator (`ValidateEntry`) | M1 main |
 | M1 high-risk mgmt | `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` | Profit-lock trailing and dynamic TP extension helpers | M1 main |
 | M1 logging | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Logging.mqh` | M1 CSV logging + dashboard | M1 main |
 | M1 management | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Management.mqh` | Alternate/legacy management + `TRADE_RESULT` print style | Not included by current M1 main |
@@ -76,36 +76,31 @@ The following list includes all files currently present in the project workspace
 - Entry conditions:
 - Session restricted to London + New York (Asian disabled)
 - Spread within dynamic/floor threshold
-- Pullback continuation entry model:
-- Fully simplified core conditions:
-- BUY: `Price > EMA20` + near/touch `EMA20` pullback + current bullish candle
-- SELL: `Price < EMA20` + near/touch `EMA20` pullback + current bearish candle
-- Trend-strength gate: `abs(EMA20 - EMA50)` in points must exceed `InpMinEmaGapPoints`
-- Momentum gate: current candle body > previous candle body
-- Volatility gate: `ATR >= InpMinAtrValue`
-- Removed from entry engine:
-- RSI filters in entry decision
-- score gating
-- previous-candle dependency
-- structure-break requirements
-- momentum gating stack
+- Pullback continuation multi-strategy model:
+- Entry Triggers (All evaluated, then processed by signal engine):
+  - **M1_EMA_PULLBACK**: (Bar-close) `EMA20 > EMA50` and `mid` pulls back to touch `EMA20` + direction check.
+  - **M1_BREAKOUT**: (Tick-level) `mid` exceeds highest high (or lowest low) of the last X periods + ATR expansion guard.
+  - **M1_REVERSAL**: (Bar-close) RSI extreme (`<30` or `>70`) + matching strict engulfing candle formulation.
+  - **M1_LIQUIDITY_SWEEP**: (Bar-close) Price takes a previous high/low and then reverses with a strong wick.
+- Entry decision:
+  - `ValidateEntry` returns an array of signals.
+  - `ProcessStrategySignals` processes the signals, applies rules (e.g. liquidity sweep override, conflict avoidance), and determines the final trade.
+- In-trade management:
+  - `StrategyFeedbackManager` reacts to new signals while a trade is open to manage it dynamically.
 - Runtime safety kept:
 - spread filter
-- EMA flat-market skip
 - cooldown controls (5-candle entry cooldown)
 - loss-cluster guard: after 2 consecutive losses, skip next 2 signal evaluations
 - Signal evaluation frequency: new M1 candle only
 - Exit / management:
 - M1 scalp exit targets:
-- SL monetary target: `$2.0`
-- no fixed TP cap
-- `ManageTrailingStop()` stepped profit lock:
-- no trailing for profit `< +1.5`
-- at `+$1.5` -> lock `+$0.5`
-- at `+$2` -> lock `+$1`
-- profit `3..10` -> lock `profit - 1` (integer levels only)
-- profit `12+` -> lock `profit - 2` (integer levels only, runner mode)
-- `ExtendTakeProfit()` can push TP farther for runners
+- Entry SL/TP from ATR:
+  - `slDistance = clamp(ATR*0.8, 2.0, 5.0)`
+  - `tpDistance = slDistance * 1.5`
+- Runner management (R-based):
+  - `>1R`: move SL to breakeven
+  - `>1.5R`: lock `+0.5R`
+  - `>2R`: trail by `1R`
 - Risk model:
 - Uses `GoldEA_Unified_Risk.mqh` via `CalculateTradeRisk()`
 - Rule A: `0.01 lot -> $3`
@@ -127,15 +122,13 @@ The following list includes all files currently present in the project workspace
 - Bollinger Bands
 - ADX
 - Market structure: Asian session high/low range
-- Active strategy logic:
-- **Asian Session (Range):** Buys near support and sells near resistance with RSI confirmation.
-- **London Session (Breakout):** Buys on breakouts above recent highs and sells on breakouts below recent lows, with strong candle confirmation.
-- **New York Session (Trend Pullback):**
-    - BUY: `EMA20 > EMA50` + pullback to EMA20 + bullish candle
-    - SELL: `EMA20 < EMA50` + pullback to EMA20 + bearish candle
+- Active strategy logic (ANY valid triggers entry, no score constraint):
+- **Range (M5_RANGE):** Asian session ONLY. Buys on RSI < 35 with bullish candle, sells on RSI > 65 with bearish candle.
+- **Breakout (M5_BREAKOUT):** London session ONLY. Places pending Buy Stop at `g_asianHigh` or Sell Stop at `g_asianLow` (if no pending order exists) to capture intra-candle breakout movement without slippage.
+- **Trend Pullback (M5_TREND_PULLBACK):** `EMA20 > EMA50` + pullback condition + bullish candle (reverse for sell).
+- **ATR Breakout (M5_ATR_BREAKOUT):** London/NY session ONLY. ADX > 28, ATR expands > 30% vs 20-period average, price breaks fast EMA.
 - Filters:
-- Spread, cooldown, max positions, duplicate-bar block, continuation checks
-- Minimum score threshold increased to `80` for stabilizer filtering
+- Minimum score requirement removed entirely in favor of strict multi-factor triggers.
 - Counter-trend gate disabled by strategy design (trend alignment required)
 - Exit / management:
 - Execution with structured M5 SL/TP: for `0.01 lot`, SL is `$10` and TP is `3R` by default
@@ -195,10 +188,11 @@ The following list includes all files currently present in the project workspace
 
 ### M1 Scalper EA
 
-- `ValidateEntry()` -> simplified EMA20 pullback + current-candle direction validator (`XAUUSD_M1_Scalper_Entry.mqh`)
+- `AdaptiveFilterCheck()` -> `XAUUSD_M1_Scalper_Entry.mqh`
+- `ValidateEntry()` -> scoring-based EMA/ATR validator with directional score comparison (`XAUUSD_M1_Scalper_Entry.mqh`)
 - `ExecuteHighRiskTrade()` -> unified fixed-SL risk engine call, position open
 - `ManageTrailingStop()` / `UpdateDynamicTP()` / `ExtendTakeProfit()` -> aggressive management
-- `OnTick()` -> position management + cooldown + frequency cap + buy/sell validation
+- `OnTick()` -> Adaptive Filter Layer -> position management + cooldown + frequency cap + buy/sell validation
 - `OnTradeTransaction()` (main) -> remove risk-map state, cooldown timing
 
 ### Shared Includes
@@ -262,14 +256,14 @@ The following list includes all files currently present in the project workspace
 ### M1 Structured Log Contract (Analyzer-Critical)
 
 - CHECK:
-- `[M1_SCALPER][GoldEA][CHECK] [M1_PA] BUY|SELL check: rsi=... ema20=... ema50=... score=... atr=... spread=... decision=... reason=...`
+- `[M1_SCALPER][GoldEA][CHECK] [M1_BREAKOUT] BUY|SELL check: rsi=... ema20=... ema50=... score=... buyScore=... sellScore=... atr=... spread=... momentum=... breakoutBuy=... breakoutSell=... slDistance=... tpDistance=... decision=... reason=...`
 - EXECUTION:
 - `[M1_SCALPER][GoldEA][EXECUTION] BUY|SELL executed: tradeId=... lot=... entry=... sl=... tp=... score=...`
 - RESULT:
 - `[M1_SCALPER][GoldEA][RESULT] STOP_LOSS_HIT tradeId=... profit=...`
 - `[M1_SCALPER][GoldEA][RESULT] TAKE_PROFIT_HIT tradeId=... profit=...`
 - Active normalized rejection reasons:
-- `CORE_CONDITION_FAIL`, `TREND_WEAK`, `MOMENTUM_WEAK`, `LOW_ATR`, `LOSS_CLUSTER_COOLDOWN`, `EMA_FLAT`, `HIGH_SPREAD`, `COOLDOWN_ACTIVE`, `COOLDOWN_5CANDLE`, `MAX_TRADES_REACHED`, `INSUFFICIENT_MARGIN`, `ORDER_FAILED`, `RISK_ENGINE_BLOCK`, `INVALID_TICKVALUE`
+- `LOW_ATR_DYNAMIC`, `WEAK_TREND`, `CHOP_MARKET_DYNAMIC`, `WEAK_CANDLE_DYNAMIC`, `WEAK_BREAKOUT_DYNAMIC`, `NY_WEAK_CONDITION`, `WEAK_BREAKOUT_REJECTED`, `CORE_CONDITION_FAIL`, `TREND_WEAK`, `MOMENTUM_WEAK`, `SCORE_TOO_LOW`, `DIRECTION_CONFLICT`, `EARLY_NOISE`, `M5_TREND_BLOCK`, `SELL_DISABLED_DEBUG`, `LOW_ATR`, `LOSS_CLUSTER_COOLDOWN`, `EMA_FLAT`, `HIGH_SPREAD`, `COOLDOWN_ACTIVE`, `COOLDOWN_5CANDLE`, `MAX_TRADES_REACHED`, `INSUFFICIENT_MARGIN`, `ORDER_FAILED`, `RISK_ENGINE_BLOCK`, `INVALID_TICKVALUE`
 
 ### Typical Lifecycle (M5)
 
@@ -311,7 +305,7 @@ The following list includes all files currently present in the project workspace
 - Structured fields are emitted consistently in CHECK/EXECUTION/RESULT lines:
 - `score=...`, `atr=...`, `spread=...`, `reason=...`, `tradeId=...`
 - M1 and M5 both emit parser-friendly:
-- `[...][CHECK] [strategy-or-CHECK] BUY|SELL check: ...`
+- `[...][CHECK] [STRATEGY_NAME] BUY|SELL check: ...`
 - `[...][EXECUTION] BUY|SELL executed: ...`
 - Rejection normalization now avoids generic `OTHER`; unknown labels map to `UNCLASSIFIED_REJECTION`.
 
@@ -326,7 +320,7 @@ The following list includes all files currently present in the project workspace
 ### M1 Scalper (`EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5`)
 
 - `OnTick()` drives runtime loop: dashboard update, open-position management, cooldown/frequency gates, then entry checks.
-- Entry validation path: `ValidateEntry(POSITION_TYPE_BUY/SELL)` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh`.
+- Entry validation path: `AdaptiveFilterCheck()` -> `ValidateEntry(POSITION_TYPE_BUY/SELL)` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh`.
 - Trade execution path: `ExecuteHighRiskTrade()` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` (calls `CalculateTradeRisk()` from `EAs/Include/GoldEA_Unified_Risk.mqh`).
 - Trade management path: `ManageTrailingStop()`, `UpdateDynamicTP()`, `ExtendTakeProfit()` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` and EA main.
 - Trade lifecycle callback: `OnTradeTransaction()` in EA main updates cooldown state and risk-map cleanup.
@@ -365,7 +359,7 @@ The following list includes all files currently present in the project workspace
 | M1 pure price-action scalping refactor | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5`, `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` |
 | M1 pullback-reversal entry refinement for trailing-SL alignment | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 ultra-simple EMA-touch entry + profit-lock exit alignment | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5`, `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` |
-| M1 Capital Booster entry simplification (no breakout/RSI/score) | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
+| M1 Capital Booster scoring entry (core+booster model) | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 trend-strength + London/NY-only filter tuning | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh`, `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 5-candle entry cooldown tuning | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh` |
 | M1 momentum + ATR quality filters | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh` |
@@ -394,6 +388,10 @@ The following list includes all files currently present in the project workspace
 - M1 prefix mismatch with parser is resolved (`[M1_SCALPER][GoldEA]` now used).
 - What changed: M1 log wrapper standardized to parser-compatible prefix.
 - Impact: M1 event ingestion in Python analysis is materially improved.
+
+- M1 strategy name logging mismatch is resolved.
+- What changed: M1 `CHECK` logs no longer hardcode `[M1_PA]`; they now dynamically insert the actual strategy name (e.g., `[M1_BREAKOUT]`).
+- Impact: The Python analyzer can now correctly attribute M1 signals to their specific strategies, fixing a major analytics blind spot.
 
 - M1 signal formatting mismatch was resolved via structured `CHECK` logs.
 - What changed: `BUY|SELL check:` lines now include `score`, `atr`, `spread`, `reason`.
@@ -433,13 +431,18 @@ The following list includes all files currently present in the project workspace
 - Impact: `illegal 'else' without matching 'if'` and trailing `not all control paths return a value`.
 - Fix: moved context assignments before branch selection in `ValidateEntry()`.
 
+- `CopyBuffer` start-index logic gap.
+- What broke: `CopyBuffer` starting at index 0 fetches the current *unformed* live candle, corrupting moving averages and instantly triggering `LOW_ATR` or falsifying expansion checks.
+- Impact: Severe logic desync. Strategies fail to trigger or evaluate incorrectly.
+- Fix: Always start array-based MVA queries against fully closed candle arrays (e.g. index 1 or `snapshot.shift`) when doing entry tests.
+
 ---
 
 ## ⚡ FAST DEBUG NAVIGATION
 
 - If NO TRADES:
 - Check M1 `OnTick()` gates in `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` (`HasOpenPosition`, cooldown, same-bar, 5-minute cap).
-- Check M1 `ValidateEntry()` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` (spread/EMA-flat/trend-strength/session gates).
+- Check M1 `ValidateEntry()` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` (ATR/spread hard gates + core/score direction checks).
 - Check M5 `EvaluateEntries()` and `SelectAndRunStrategy()` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh` and `EAs/Adaptive/XAUUSD_Adaptive_Entry.mqh` (trend-pullback decisions only).
 
 - If TOO MANY SKIPS:

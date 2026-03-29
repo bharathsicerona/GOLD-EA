@@ -68,7 +68,7 @@ CHECK_RE = re.compile(
 )
 EXEC_RE = re.compile(
     r"""
-    (?P<side>BUY|SELL)\s+executed:
+    (?P<side>BUY|SELL)\s+(?P<exec_type>executed|pending):
     (?P<body>.*)
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -82,8 +82,16 @@ RESULT_RE = re.compile(
         (?P<partial>PARTIAL\s+CLOSE(?:D)?)|
         (?P<skip>Trade\s+skipped)|
         (?P<trail>Trailing\s+stop\s+updated)|
+        (?P<pending_expired>PENDING_EXPIRED)|
         (?P<other>.*)
     )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+STATS_RE = re.compile(
+    r"""
+    (?P<strategy>M1_BREAKOUT)\s+scan:
+    (?P<body>.*)
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -146,8 +154,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "paths",
-        nargs="+",
-        help="One or more .log/.txt files or directories containing logs.",
+        nargs="*",
+        help="One or more .log/.txt files or directories containing logs. Defaults to the 'logs' folder in the project root.",
     )
     parser.add_argument(
         "--export-summary-csv",
@@ -369,6 +377,7 @@ def parse_log_file(path: Path) -> list[Event]:
                 parse_check_line(content, path, ea_type, timestamp)
                 or parse_execution_line(content, path, ea_type, timestamp)
                 or parse_result_line(content, path, ea_type, timestamp)
+                or parse_stats_line(content, path, ea_type, timestamp)
             )
             if event:
                 event.raw = line.strip()
@@ -507,12 +516,16 @@ def parse_execution_line(line: str, source_file: Path, ea_type: str, timestamp: 
     symbol = extract_symbol(line) or extract_symbol(source_file.name)
     trade_id_match = TRADE_ID_RE.search(body)
 
+    exec_type = match.group("exec_type").lower()
+    action = "PENDING_PLACED" if exec_type == "pending" else "TRADE_EXECUTED"
+    result = "PENDING" if exec_type == "pending" else "EXECUTED"
+
     return build_event(
         ea_type=ea_type,
         timestamp=timestamp,
         symbol=symbol,
         source_file=source_file,
-        action="TRADE_EXECUTED",
+        action=action,
         trade_type=match.group("side"),
         strategy=kv.get("strategy", ""),
         score=parse_float(kv.get("score")),
@@ -521,7 +534,7 @@ def parse_execution_line(line: str, source_file: Path, ea_type: str, timestamp: 
         sl=parse_float(kv.get("sl")),
         tp=parse_float(kv.get("tp")),
         reason=extract_reason_from_text(body, default=kv.get("reason", "EXECUTED")),
-        result="EXECUTED",
+        result=result,
         trade_id=trade_id_match.group(1) if trade_id_match else "",
     )
 
@@ -561,6 +574,8 @@ def parse_result_line(line: str, source_file: Path, ea_type: str, timestamp: str
         action, result = "PARTIAL_CLOSE", "PARTIAL"
     elif match.group("skip"):
         action, result = "TRADE_SKIPPED", "SKIPPED"
+    elif match.group("pending_expired"):
+        action, result = "PENDING_EXPIRED", "EXPIRED"
     elif match.group("trail"):
         action, result = "TRAILING_UPDATE", "MANAGEMENT"
     
@@ -581,6 +596,24 @@ def parse_result_line(line: str, source_file: Path, ea_type: str, timestamp: str
         result=result,
         trade_id=trade_id,
         profit=profit,
+    )
+
+
+def parse_stats_line(line: str, source_file: Path, ea_type: str, timestamp: str) -> Event | None:
+    match = STATS_RE.search(line)
+    if not match:
+        return None
+    kv = parse_kv_pairs(match.group("body"))
+    return build_event(
+        ea_type=ea_type,
+        timestamp=timestamp,
+        symbol=extract_symbol(source_file.name),
+        source_file=source_file,
+        action="STATS_SCAN",
+        trade_type="",
+        strategy=match.group("strategy"),
+        reason="active=" + kv.get("active", "false"),
+        result="STATS"
     )
 
 
@@ -899,6 +932,12 @@ def summarize(events: list[Event]) -> dict[str, object]:
     total_signals = len(signal_events)
     total_executed = len(executed_events)
     total_skipped = len(skipped_events)
+    
+    pending_placed = len([e for e in events if e.action == "PENDING_PLACED"])
+    pending_expired = len([e for e in events if e.action == "PENDING_EXPIRED"])
+    pending_filled = len([e for e in events if e.action == "TRADE_EXECUTED" and "FILLED" in e.strategy.upper()])
+    breakout_scan_inactive = len([e for e in events if e.action == "STATS_SCAN" and "active=false" in e.reason.lower()])
+    
     execution_rate = (total_executed / total_signals * 100.0) if total_signals else 0.0
     rejection_rate = (total_skipped / total_signals * 100.0) if total_signals else 0.0
     win_rate = (len(win_trades) / total_resolved * 100.0) if total_resolved else 0.0
@@ -995,6 +1034,10 @@ def summarize(events: list[Event]) -> dict[str, object]:
         "trade_clusters_detected": trade_clusters,
         "average_score_executed": round(avg_score, 2) if avg_score is not None else None,
         "average_atr": round(avg_atr, 2) if avg_atr is not None else None,
+        "pending_placed": pending_placed,
+        "pending_expired": pending_expired,
+        "pending_filled": pending_filled,
+        "breakout_scan_inactive": breakout_scan_inactive,
         "top_rejection_reasons": rejection_counter.most_common(10),
         "rejection_reason_distribution": rejection_reason_distribution,
         "reasons": reason_counter.most_common(),
@@ -1246,6 +1289,12 @@ def export_json(path: Path, payload: dict[str, object]) -> None:
 
 def main() -> int:
     args = parse_args()
+    if not args.paths:
+        default_logs_dir = Path(__file__).parent.parent / "logs"
+        if default_logs_dir.exists() and default_logs_dir.is_dir():
+            args.paths = [str(default_logs_dir)]
+        else:
+            args.paths = ["."]
     files = discover_files(args.paths)
     if not files:
         print("No .log or .txt files found.", file=sys.stderr)

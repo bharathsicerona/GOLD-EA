@@ -43,6 +43,7 @@ input double           InpRsiSellMax             = 48.0;
 
 input double           InpRiskPercent            = 1.0;
 input double           InpMaxAbsoluteRiskPercent = 10.0;
+input bool             InpUseDynamicLotSizing    = false; // Intentionally disabled by default (0.01 fixed phase)
 input bool             InpAllowCounterTrend      = true;
 input double           InpCounterTrendRisk       = 0.50;
 input int              InpCounterTrendMinScore   = 85;

@@ -35,6 +35,7 @@ InpTakeProfitMultiplier = 1.8
 InpTrailAtrMultiplier = 0.8
 InpMinAtrPoints = 120.0
 InpPullbackAtrFactor = 0.20
+InpBreakoutCandles = 10 // For M1 Scalper EA
 
 InpAllowBuyTrades = true
 InpAllowSellTrades = true
