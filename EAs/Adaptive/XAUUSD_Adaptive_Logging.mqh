@@ -66,11 +66,12 @@ void UpdateDashboard(const DecisionContext &context)
 
    SetDashboardLine("Title",StringFormat("GOLD EA %s Dashboard",EA_TYPE),clrWhite,0);
    SetDashboardLine("Session",StringFormat("Session        : %s [%s]",context.sessionName,context.status),statusColor,1);
-   SetDashboardLine("Strategy",StringFormat("Strategy       : %s (Risk: %.1f%%)",context.strategyName,context.riskPercent),clrPlum,2);
-   SetDashboardLine("ATR",StringFormat("ATR            : %.2f",context.atr),clrKhaki,3);
-   SetDashboardLine("Score",StringFormat("Current Score  : %d",context.score),scoreColor,4);
-   SetDashboardLine("Decision",StringFormat("Trade Decision : %s (%s)",context.decision,context.phase),decisionColor,5);
-   SetDashboardLine("Reason",StringFormat("Reason         : %s",context.reason),clrYellow,6);
+   SetDashboardLine("EntryMode","Entry Mode     : CLOSED CANDLE",clrCyan,2);
+   SetDashboardLine("Strategy",StringFormat("Strategy       : %s (Risk: %.1f%%)",context.strategyName,context.riskPercent),clrPlum,3);
+   SetDashboardLine("ATR",StringFormat("ATR            : %.2f",context.atr),clrKhaki,4);
+   SetDashboardLine("Score",StringFormat("Current Score  : %d",context.score),scoreColor,5);
+   SetDashboardLine("Decision",StringFormat("Trade Decision : %s (%s)",context.decision,context.phase),decisionColor,6);
+   SetDashboardLine("Reason",StringFormat("Reason         : %s",context.reason),clrYellow,7);
   }
 
 void DrawTradeArrow(const ulong tradeId,const ENUM_POSITION_TYPE type,const bool isCounterTrend,const double price)

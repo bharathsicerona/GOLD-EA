@@ -28,6 +28,7 @@ struct IndicatorSnapshot
    double rsi;
    double prevRsi;
    double atr;
+   double atrAvg;
    double bbUpper;
    double bbLower;
    double bbBase;
@@ -172,6 +173,17 @@ bool CalculateIndicators(IndicatorSnapshot &snapshot,const int shift)
       !GetIndicatorValue(g_adxHandle,shift,snapshot.adx,0) ||
       !GetIndicatorValue(g_adxHandle,shift+1,snapshot.prevAdx,0))
       return false;
+
+   double atrArr[];
+   ArraySetAsSeries(atrArr, true);
+   if(CopyBuffer(g_atrHandle, 0, shift, 20, atrArr) == 20)
+     {
+      double sum = 0;
+      for(int i = 0; i < 20; i++) sum += atrArr[i];
+      snapshot.atrAvg = sum / 20.0;
+     }
+   else
+      snapshot.atrAvg = snapshot.atr;
 
    int nextIndex = shift + 1;
    snapshot.price      = (SymbolInfoDouble(InpTradeSymbol,SYMBOL_BID) + SymbolInfoDouble(InpTradeSymbol,SYMBOL_ASK)) * 0.5;

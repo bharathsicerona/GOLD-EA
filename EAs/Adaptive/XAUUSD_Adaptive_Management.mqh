@@ -1,17 +1,6 @@
 #ifndef XAUUSD_ADAPTIVE_MANAGEMENT_MQH
 #define XAUUSD_ADAPTIVE_MANAGEMENT_MQH
 
-//=============================================================================
-// CHANGELOG
-// Version 2.1 (EA Log Tagging)
-// * Added EA_TYPE input to uniquely identify M1 vs M5 EA instances.
-// * Implemented Log() wrapper function for unified console output.
-// * Replaced all Print(), PrintFormat(), and DebugPrint() calls with Log().
-// * Structured TRADE_RESULT logs to include ticket and profit= values for parsing.
-//=============================================================================
-
-// Note: EA_TYPE must now be defined in the main .mq5 files before #include
-
 void Log(string message)
 {
    Print("[" + EA_TYPE + "][GoldEA] " + message);
@@ -22,12 +11,17 @@ void LogTyped(string type, string message)
    Print("[" + EA_TYPE + "][GoldEA][" + type + "] " + message);
 }
 
+//--- Session Trade Tracking
+ENUM_SESSION g_currentSession = SESSION_NONE;
+int g_sessionTradeCountTrend = 0;
+int g_sessionTradeCountBreakout = 0;
+
 int totalSignals = 0;
 int totalTrades = 0;
 int totalSkipped = 0;
 int totalWins = 0;
 int totalLosses = 0;
-int rejectLowScore = 0;
+int rejectLowAtr = 0;
 int rejectSpread = 0;
 int rejectMargin = 0;
 int rejectSession = 0;
@@ -38,21 +32,28 @@ const int STATS_PRINT_INTERVAL = 10;
 
 string NormalizeRejectReason(const string rawReason)
 {
+   if(rawReason == "" || rawReason == "UNKNOWN" || rawReason == "NO_SETUP")
+      return "UNCLASSIFIED_REJECTION";
+
    string u = rawReason;
    StringToUpper(u);
    if(StringFind(u, "SPREAD") >= 0) return "HIGH_SPREAD";
-   if(StringFind(u, "SCORE") >= 0) return "LOW_SCORE";
-   if(StringFind(u, "SESSION") >= 0 || StringFind(u, "ASIAN") >= 0) return "SESSION_BLOCK";
+   if(StringFind(u, "ATR") >= 0 || StringFind(u, "VOLATILITY") >= 0) return "LOW_ATR";
+   if(StringFind(u, "SESSION") >= 0) return "SESSION_BLOCK";
    if(StringFind(u, "COOLDOWN") >= 0) return "COOLDOWN_ACTIVE";
    if(StringFind(u, "MAX") >= 0 || StringFind(u, "DUPLICATE") >= 0) return "MAX_TRADES_REACHED";
    if(StringFind(u, "MARGIN") >= 0 || StringFind(u, "LOT_SIZE_ZERO") >= 0) return "INSUFFICIENT_MARGIN";
+   if(StringFind(u, "MODE") >= 0) return "NO_MARKET_MODE";
+   if(StringFind(u, "WEAK_TREND") >= 0) return "WEAK_TREND";
+   if(StringFind(u, "WEAK_CANDLE") >= 0) return "WEAK_CANDLE";
    if(StringFind(u, "VALID") >= 0 || StringFind(u, "READY") >= 0 || StringFind(u, "EXECUTED") >= 0) return "VALID";
-   return "OTHER";
+   
+   return rawReason;
 }
 
 void CountRejection(const string reasonCode)
 {
-   if(reasonCode == "LOW_SCORE") rejectLowScore++;
+   if(reasonCode == "LOW_ATR") rejectLowAtr++;
    else if(reasonCode == "HIGH_SPREAD") rejectSpread++;
    else if(reasonCode == "INSUFFICIENT_MARGIN") rejectMargin++;
    else if(reasonCode == "SESSION_BLOCK") rejectSession++;
@@ -73,9 +74,9 @@ void LogStatsIfDue()
    if(totalTrades <= 0 || (totalTrades % STATS_PRINT_INTERVAL) != 0)
       return;
    LogTyped("STATS", StringFormat("signals=%d trades=%d skipped=%d win=%d loss=%d",
-                                  totalSignals, totalTrades, totalSkipped, totalWins, totalLosses));
-   LogTyped("STATS", StringFormat("lowScore=%d spread=%d margin=%d session=%d cooldown=%d maxTrades=%d other=%d",
-                                  rejectLowScore, rejectSpread, rejectMargin, rejectSession, rejectCooldown, rejectMaxTrades, rejectOther));
+                                   totalSignals, totalTrades, totalSkipped, totalWins, totalLosses));
+   LogTyped("STATS", StringFormat("lowAtr=%d spread=%d margin=%d session=%d cooldown=%d maxTrades=%d other=%d",
+                                   rejectLowAtr, rejectSpread, rejectMargin, rejectSession, rejectCooldown, rejectMaxTrades, rejectOther));
 }
 
 int CountPositions(const ENUM_POSITION_TYPE positionType)
@@ -145,115 +146,71 @@ ulong FindPositionTicketByComment(const string commentText)
    return 0;
   }
 
+//+------------------------------------------------------------------+
+//| ExecuteTrade - Implements strict strategy-specific risk          |
+//+------------------------------------------------------------------+
 bool ExecuteTrade(const DecisionContext &context)
   {
-   if(!context.valid)
-      return false;
+   if(!context.valid || context.strategyName == "" || context.strategyName == "NONE" || context.strategyName == "UNKNOWN")
+   {
+       LogTyped("REJECTION", "INVALID_STRATEGY");
+       return false;
+   }
+
+   // --- 1. TRADE FREQUENCY CONTROL ---
+   if(context.strategyName == "M5_TREND_PULLBACK" && g_sessionTradeCountTrend >= 2)
+   {
+       LogRejection(context.decision, "MAX_TRADES_REACHED", 0.0, AccountInfoDouble(ACCOUNT_BALANCE));
+       return false;
+   }
+   if(context.strategyName == "M5_ATR_BREAKOUT" && g_sessionTradeCountBreakout >= 1)
+   {
+       LogRejection(context.decision, "MAX_TRADES_REACHED", 0.0, AccountInfoDouble(ACCOUNT_BALANCE));
+       return false;
+   }
 
    if(HasOpenPosition())
      {
-      int totalCount = CountPositions(POSITION_TYPE_BUY) + CountPositions(POSITION_TYPE_SELL);
       LogRejection(context.decision, "MAX_TRADES_REACHED", 0.0, AccountInfoDouble(ACCOUNT_BALANCE));
-      LogTyped("REJECTION", StringFormat("blocked existing position count=%d", totalCount));
-      LogToCSV("TRADE_BLOCKED",context.sessionName,context.strategyName,context.price,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"MAX_GLOBAL_POSITIONS");
       return false;
      }
 
    double entryPrice = (context.type == POSITION_TYPE_BUY) ? SymbolInfoDouble(InpTradeSymbol,SYMBOL_ASK) : SymbolInfoDouble(InpTradeSymbol,SYMBOL_BID);
-   bool isPendingBreakout = (context.strategyName == "M5_BREAKOUT");
-   if(isPendingBreakout)
-     {
-      bool hasPending = false;
-      for(int i = OrdersTotal() - 1; i >= 0; i--) {
-          ulong tk = OrderGetTicket(i);
-          if (tk > 0 && OrderGetString(ORDER_SYMBOL) == InpTradeSymbol && OrderGetInteger(ORDER_MAGIC) == InpMagicNumber) {
-              long otype = OrderGetInteger(ORDER_TYPE);
-              if (context.type == POSITION_TYPE_BUY && otype == ORDER_TYPE_BUY_STOP) hasPending = true;
-              if (context.type == POSITION_TYPE_SELL && otype == ORDER_TYPE_SELL_STOP) hasPending = true;
-          }
-      }
-      if (hasPending) {
-          LogRejection(context.decision, "PENDING_ALREADY_EXISTS", 0.0, AccountInfoDouble(ACCOUNT_BALANCE));
-          return false;
-      }
-      entryPrice = (context.type == POSITION_TYPE_BUY) ? g_asianHigh : g_asianLow;
-     }
-
-   double lotSizingDistance = context.atr * InpStopAtrMultiplier; // kept only for existing lot selection behavior
-
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double lot = 0.01;
-   if(InpUseDynamicLotSizing)
-     {
-      lot = CalculateLotSize(lotSizingDistance, balance);
-      if (lot < 0.01) lot = 0.01;
-     }
-   else
-     {
-      // Option B chosen: XAUUSD_Adaptive_Risk.mqh is intentionally bypassed in current phase
-      // to enforce fixed 0.01 lot size and static $10 risk for parallel strategy evaluation.
-      lot = 0.01;
-     }
-   if(lot <= 0.0)
-     {
-      LogRejection(context.decision, "INSUFFICIENT_MARGIN", lot, AccountInfoDouble(ACCOUNT_BALANCE));
-      LogTyped("REJECTION", "Trade skipped because lot calculation returned 0.");
-      LogToCSV("TRADE_SKIPPED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"LOT_SIZE_ZERO");
-      return false;
-     }
+   double lot = 0.01; // Fixed 0.01 
+   
+   double riskDistance = context.atr * 1.0; 
+   double tpDistance = riskDistance * 3.0; 
+   
+   // --- 2. CORE R-MULTIPLE CONFIGURATION ---
+   if(context.strategyName == "M5_TREND_PULLBACK")
+   {
+       riskDistance = context.atr * 0.8;
+       tpDistance = riskDistance * 2.5; // Target 2.5R
+   }
+   else if(context.strategyName == "M5_ATR_BREAKOUT")
+   {
+       riskDistance = context.atr * 1.2;
+       tpDistance = riskDistance * 4.0; // Target 4R
+   }
 
-   double tickSize   = SymbolInfoDouble(InpTradeSymbol,SYMBOL_TRADE_TICK_SIZE);
-   double tickValue  = SymbolInfoDouble(InpTradeSymbol,SYMBOL_TRADE_TICK_VALUE);
-   if(tickSize <= 0.0 || tickValue <= 0.0)
-     {
-      LogRejection(context.decision, "OTHER", lot, balance);
-      LogTyped("REJECTION", "Trade skipped because tick size/value is invalid for fixed risk model.");
-      LogToCSV("TRADE_SKIPPED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"INVALID_TICK_VALUE");
-      return false;
-     }
-
-   double riskDistance = CalculateFixedSLDistance(lot, balance);
-   if(riskDistance <= 0.0)
-     {
-      LogRejection(context.decision, "OTHER", lot, balance);
-      LogTyped("REJECTION", "Trade skipped because fixed monetary SL distance is invalid.");
-      LogToCSV("TRADE_SKIPPED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"FIXED_SL_INVALID");
-      return false;
-     }
-
-   // M5 structured risk: for 0.01 lot, enforce $10 stop risk if dynamic sizing disabled.
-   if(!InpUseDynamicLotSizing && lot <= 0.0100001)
-     {
-      double m5RiskUsd = 10.0;
-      double customDistance = (m5RiskUsd * tickSize) / (tickValue * lot);
-      if(customDistance <= 0.0)
-        {
-         LogRejection(context.decision, "OTHER", lot, balance);
-         LogTyped("REJECTION", "Trade skipped because custom M5 risk distance is invalid.");
-         LogToCSV("TRADE_SKIPPED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,"M5_CUSTOM_RISK_INVALID");
-         return false;
-        }
-      riskDistance = customDistance;
-     }
-
-   double moneyPerLot = (riskDistance / tickSize) * tickValue;
-   double expectedLoss = lot * moneyPerLot;
-
-   double actualRiskPercent = (expectedLoss / balance) * 100.0;
-   double tpMultiple = 3.0;
-   double tpDistance = riskDistance * tpMultiple;
    double sl = 0.0;
    double tp = 0.0;
 
-   if(context.type == POSITION_TYPE_BUY)
+   if(context.sl > 0 && context.tp > 0)
+     {
+      sl = NormalizeDouble(context.sl, g_symbolDigits);
+      tp = NormalizeDouble(context.tp, g_symbolDigits);
+     }
+   else if(context.type == POSITION_TYPE_BUY)
      {
       sl = NormalizeStop(entryPrice - riskDistance, entryPrice, ORDER_TYPE_BUY);
-      tp = NormalizeDouble(entryPrice + tpDistance,g_symbolDigits);
+      tp = NormalizeDouble(entryPrice + tpDistance, g_symbolDigits);
      }
    else if(context.type == POSITION_TYPE_SELL)
      {
       sl = NormalizeStop(entryPrice + riskDistance, entryPrice, ORDER_TYPE_SELL);
-      tp = NormalizeDouble(entryPrice - tpDistance,g_symbolDigits);
+      tp = NormalizeDouble(entryPrice - tpDistance, g_symbolDigits);
      }
 
    ulong tradeId = NextTradeId();
@@ -263,34 +220,15 @@ bool ExecuteTrade(const DecisionContext &context)
    trade.SetDeviationInPoints(20);
 
    bool success = false;
-   if(isPendingBreakout)
-     {
-      MqlDateTime dt;
-      TimeToStruct(TimeTradeServer(), dt);
-      dt.hour = InpLondonEndHour;
-      dt.min = 0;
-      dt.sec = 0;
-      datetime expiry = StructToTime(dt);
-
-      if(context.type == POSITION_TYPE_BUY)
-         success = trade.OrderOpen(InpTradeSymbol, ORDER_TYPE_BUY_STOP, lot, 0.0, entryPrice, sl, tp, ORDER_TIME_SPECIFIED, expiry, commentText);
-      else if(context.type == POSITION_TYPE_SELL)
-         success = trade.OrderOpen(InpTradeSymbol, ORDER_TYPE_SELL_STOP, lot, 0.0, entryPrice, sl, tp, ORDER_TIME_SPECIFIED, expiry, commentText);
-     }
-   else
-     {
-      if(context.type == POSITION_TYPE_BUY)
-         success = trade.Buy(lot,InpTradeSymbol,0.0,sl,tp,commentText);
-      else if(context.type == POSITION_TYPE_SELL)
-         success = trade.Sell(lot,InpTradeSymbol,0.0,sl,tp,commentText);
-     }
+   if(context.type == POSITION_TYPE_BUY)
+      success = trade.Buy(lot,InpTradeSymbol,0.0,sl,tp,commentText);
+   else if(context.type == POSITION_TYPE_SELL)
+      success = trade.Sell(lot,InpTradeSymbol,0.0,sl,tp,commentText);
 
    if(!success)
      {
       string failReason = StringFormat("ORDER_FAILED_%d_%s",trade.ResultRetcode(),trade.ResultRetcodeDescription());
-      LogRejection(context.decision, "OTHER", lot, balance);
-      LogTyped("REJECTION", StringFormat("%s order failed: %s",context.decision,failReason));
-      LogToCSV(context.decision + "_FAILED",context.sessionName,context.strategyName,entryPrice,context.rsi,context.ema50,context.ema200,context.atr,context.spread,context.score,context.decision,failReason);
+      LogRejection(context.decision, "ORDER_FAILED", lot, balance);
       return false;
      }
 
@@ -300,46 +238,39 @@ bool ExecuteTrade(const DecisionContext &context)
       ticket = (ulong)HistoryDealGetInteger(resultDeal,DEAL_POSITION_ID);
    if(ticket == 0)
       ticket = FindPositionTicketByComment(commentText);
-   if(ticket == 0)
-      ticket = FindPositionTicket(context.type);
 
    if(ticket > 0)
      {
       GlobalVariableSet(BuildStateKey("initrisk",ticket),riskDistance);
-      GlobalVariableSet(BuildStateKey("partial",ticket),0.0);
-      GlobalVariableSet(BuildStateKey("minprofit",ticket),0.0);
-      GlobalVariableSet(BuildStateKey("acclock",ticket),0.0);
       GlobalVariableSet(BuildStateKey("tradeid",ticket),(double)tradeId);
-      GlobalVariableSet(BuildStateKey("M5TrailLevel", ticket), 0); // Initialize R-Multiple Trail Level
+      double stratId = 0.0;
+      if(context.strategyName == "M5_TREND_PULLBACK") stratId = 1.0;
+      else if(context.strategyName == "M5_ATR_BREAKOUT") stratId = 2.0;
+      else if(context.strategyName == "M5_SMART_REVERSAL_FVG") stratId = 3.0;
+      GlobalVariableSet(BuildStateKey("strategy",ticket), stratId);
+      GlobalVariableSet(BuildStateKey("M5TrailLevel", ticket), 0); 
      }
 
-   if(context.type == POSITION_TYPE_BUY)
-      g_lastBuyBar = g_lastBarTime;
-   else if(context.type == POSITION_TYPE_SELL)
-      g_lastSellBar = g_lastBarTime;
-   g_lastTradeTime = TimeTradeServer();
+   if(context.strategyName == "M5_TREND_PULLBACK") g_sessionTradeCountTrend++;
+   else if(context.strategyName == "M5_ATR_BREAKOUT") g_sessionTradeCountBreakout++;
 
-   DrawTradeArrow(tradeId, context.type, context.isCounterTrend, entryPrice);
+   DrawTradeArrow(tradeId, context.type, false, entryPrice);
    totalTrades++;
-    string execType = isPendingBreakout ? "M5_BREAKOUT" : context.strategyName;
-    string execKeyword = isPendingBreakout ? "pending:" : "executed:";
-    LogTyped("EXECUTION", StringFormat("%s %s tradeId=%I64u lot=%.2f entry=%.2f sl=%.2f tp=%.2f strategy=%s",
-                                       context.decision, execKeyword, tradeId, lot, entryPrice, sl, tp, execType));
-   string logAction = context.decision + (isPendingBreakout ? "_PENDING_PLACED" : "_EXECUTED");
-   LogToCSV(logAction,context.sessionName,execType,entryPrice,0.0,0.0,0.0,0.0,0,context.score,context.decision,StringFormat("TRADE_ID_%I64u",tradeId));
 
-   if(InpEnablePushAlerts || InpEnableEmailAlerts)
-     {
-      string alertSubject = StringFormat("GoldEA %s %s Executed", execType, context.decision);
-      string alertMsg = StringFormat("Action: %s %s\nType: %s\nActual Risk: %.2f%%\nLot: %.2f\nEntry: %.2f\nSL: %.2f\nTP Dist: %.2f points\nTP R: %.1f\nScore: %d",
-                                     context.decision, InpTradeSymbol, execType, actualRiskPercent, lot, entryPrice, sl, tpDistance / _Point, tpMultiple, context.score);
-      if(InpEnablePushAlerts) SendNotification(alertSubject + "\n" + alertMsg);
-      if(InpEnableEmailAlerts) SendMail(alertSubject, alertMsg);
-     }
+   // Store Trade Context for lifecycle tracking
+   TradeContext *tCtx = new TradeContext(context.strategyName, (context.type == POSITION_TYPE_BUY ? "BUY" : "SELL"), "M5");
+   g_tradeContextMap.Add(tradeId, tCtx);
 
+   datetime barTime = iTime(InpTradeSymbol, InpTimeframe, 1);
+   LogTyped("EXECUTION", StringFormat("[%s] %s executed: tradeId=%I64u barTime=%s lot=%.2f entry=%.2f sl=%.2f tp=%.2f strategy=%s",
+                                       context.strategyName, tCtx.side, tradeId, TimeToString(barTime), lot, entryPrice, sl, tp, context.strategyName));
+   
    return true;
   }
 
+//+------------------------------------------------------------------+
+//| ManageTrade - Fixed R-Multiple Trailing (Removes aggressive BE)  |
+//+------------------------------------------------------------------+
 void ManageTrade(const ulong ticket,const bool isNewBar)
   {
    if(!PositionSelectByTicket(ticket))
@@ -353,14 +284,7 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
    double openPrice        = PositionGetDouble(POSITION_PRICE_OPEN);
    double currentSl        = PositionGetDouble(POSITION_SL);
    double currentTp        = PositionGetDouble(POSITION_TP);
-   double volume           = PositionGetDouble(POSITION_VOLUME);
-   double profitMoney      = PositionGetDouble(POSITION_PROFIT);
-   double balance          = AccountInfoDouble(ACCOUNT_BALANCE);
-
-   IndicatorSnapshot snapshot;
-   if(!CalculateIndicators(snapshot,0))
-      return;
-
+   
    double initialRisk = 0.0;
    string riskKey = BuildStateKey("initrisk",ticket);
    if(GlobalVariableCheck(riskKey))
@@ -375,186 +299,75 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
    double profitDistance = (type == POSITION_TYPE_BUY) ? (priceNow - openPrice)
                                                        : (openPrice - priceNow);
    double rMultiple = profitDistance / initialRisk;
-   const bool allowStopLossUpdates = false; // Keep legacy blocks disabled; custom M5 trailing below is active.
 
-   // --- M5 R-Multiple Trailing Stop System ---
+   string strategyKey = BuildStateKey("strategy",ticket);
+   int strategy = GlobalVariableCheck(strategyKey) ? (int)GlobalVariableGet(strategyKey) : 0;
+   
    string trailLevelKey = BuildStateKey("M5TrailLevel", ticket);
-   if (GlobalVariableCheck(trailLevelKey))
+   int currentTrailLevel = GlobalVariableCheck(trailLevelKey) ? (int)GlobalVariableGet(trailLevelKey) : 0;
+
+   double newSlPrice = 0.0;
+   int desiredTrailLevel = currentTrailLevel;
+
+   // 🔹 TREND_PULLBACK Management
+   if(strategy == 1) // TREND_PULLBACK
    {
-       int currentTrailLevel = (int)GlobalVariableGet(trailLevelKey);
-       int desiredTrailLevel = currentTrailLevel;
-
-       // Determine the highest trail level the trade currently qualifies for
-       if (rMultiple >= 2.0) desiredTrailLevel = 2;
-       else if (rMultiple >= 1.0) desiredTrailLevel = 1;
-
-       // If the trade qualifies for a higher level than it's currently on
-       if (desiredTrailLevel > currentTrailLevel)
+       if(rMultiple >= 1.0 && currentTrailLevel < 1)
        {
-           double newSL_R = 0.0;
-           // Get the target SL in R-terms based on the desired level
-           if (desiredTrailLevel == 1) newSL_R = 0.2; // At 1.0R profit, move SL to +0.2R
-           if (desiredTrailLevel == 2) newSL_R = 1.0; // At 2.0R profit, move SL to +1.0R
+           desiredTrailLevel = 1; // Breakeven
+           newSlPrice = (type == POSITION_TYPE_BUY) ? (openPrice + initialRisk * 0.05) : (openPrice - initialRisk * 0.05);
+       }
+       else if(rMultiple >= 2.0 && currentTrailLevel < 2)
+       {
+           desiredTrailLevel = 2; // Lock 1R
+           newSlPrice = (type == POSITION_TYPE_BUY) ? (openPrice + initialRisk * 1.0) : (openPrice - initialRisk * 1.0);
+       }
+   }
+   // 🔹 ATR_BREAKOUT Management
+   else if(strategy == 2) // ATR_BREAKOUT
+   {
+       if(rMultiple >= 1.5 && currentTrailLevel < 1)
+       {
+           desiredTrailLevel = 1; // Lock 0.5R
+           newSlPrice = (type == POSITION_TYPE_BUY) ? (openPrice + initialRisk * 0.5) : (openPrice - initialRisk * 0.5);
+       }
+       else if(rMultiple >= 3.0 && currentTrailLevel < 2)
+       {
+           desiredTrailLevel = 2; // Lock 2.0R
+           newSlPrice = (type == POSITION_TYPE_BUY) ? (openPrice + initialRisk * 2.0) : (openPrice - initialRisk * 2.0);
+       }
+   }
+   // 🔹 SMART_REVERSAL_FVG Management
+   else if(strategy == 3) // SMART_REVERSAL_FVG
+   {
+       if(rMultiple >= 1.0 && currentTrailLevel < 1)
+       {
+           desiredTrailLevel = 1; // Breakeven
+           newSlPrice = (type == POSITION_TYPE_BUY) ? (openPrice + initialRisk * 0.1) : (openPrice - initialRisk * 0.1);
+       }
+       else if(rMultiple >= 2.0 && currentTrailLevel < 2)
+       {
+           desiredTrailLevel = 2; // Lock 1.0R
+           newSlPrice = (type == POSITION_TYPE_BUY) ? (openPrice + initialRisk * 1.0) : (openPrice - initialRisk * 1.0);
+       }
+   }
 
-           double newSlPrice = 0.0;
-           if (type == POSITION_TYPE_BUY)
-               newSlPrice = NormalizeDouble(openPrice + (initialRisk * newSL_R), g_symbolDigits);
-           else // SELL
-               newSlPrice = NormalizeDouble(openPrice - (initialRisk * newSL_R), g_symbolDigits);
-
-           // Check if the new SL is a valid improvement
-           bool isImproved = (type == POSITION_TYPE_BUY && newSlPrice > currentSl) ||
-                             (type == POSITION_TYPE_SELL && newSlPrice < currentSl);
-           
-           if (isImproved)
+   if(desiredTrailLevel > currentTrailLevel && newSlPrice > 0)
+   {
+       newSlPrice = NormalizeDouble(newSlPrice, g_symbolDigits);
+       bool isImproved = (type == POSITION_TYPE_BUY && newSlPrice > currentSl) ||
+                         (type == POSITION_TYPE_SELL && (currentSl == 0.0 || newSlPrice < currentSl));
+       
+       if(isImproved)
+       {
+           if(trade.PositionModify(ticket, newSlPrice, currentTp))
            {
-               if (trade.PositionModify(ticket, newSlPrice, currentTp))
-               {
-                   GlobalVariableSet(trailLevelKey, desiredTrailLevel);
-                   string logReason = StringFormat("PROFIT_%.2fR_SL_TO_+%.2fR", rMultiple, newSL_R);
-                   Log(StringFormat("[MGMT][TRAIL] M5 R-Multiple Profit reached %.2fR. Moving SL to +%.2fR (New SL: %.2f, Level: %d)", rMultiple, newSL_R, newSlPrice, desiredTrailLevel));
-                   LogToCSV("M5_R_TRAIL_UPDATE", SessionToString(snapshot.session), "TRADE_MGMT", priceNow, snapshot.rsi, snapshot.fastEma, snapshot.slowEma, snapshot.atr, snapshot.spread, desiredTrailLevel, PositionTypeText(type), logReason);
-               }
-           }
-           else
-           {
-               // If the SL is not an improvement but the level is, update the level to prevent re-calculation.
-               // This can happen if another trailing stop system has already moved the SL further.
-               GlobalVariableSet(trailLevelKey, desiredTrailLevel);
+               GlobalVariableSet(trailLevelKey, (double)desiredTrailLevel);
+               LogTyped("MGMT", StringFormat("[%s] Trail updated tradeId=%I64u to level=%d R=%.2f", 
+                        (strategy==1?"M5_TREND_PULLBACK":"M5_ATR_BREAKOUT"), ticket, desiredTrailLevel, rMultiple));
            }
        }
    }
-   // --- End of M5 R-Multiple Trailing Stop ---
-
-   string accLockKey = BuildStateKey("acclock",ticket);
-   bool isAccLockActive = (GlobalVariableCheck(accLockKey) && GlobalVariableGet(accLockKey) >= 1.0);
-   if(allowStopLossUpdates && !isAccLockActive && InpAccountProfitLockTriggerPercent > 0.0)
-     {
-      double triggerMoney = balance * (InpAccountProfitLockTriggerPercent / 100.0);
-      if(profitMoney >= triggerMoney)
-        {
-         double targetMoney = balance * (InpAccountProfitLockTargetPercent / 100.0);
-         double tickSize   = SymbolInfoDouble(InpTradeSymbol,SYMBOL_TRADE_TICK_SIZE);
-         double tickValue  = SymbolInfoDouble(InpTradeSymbol,SYMBOL_TRADE_TICK_VALUE);
-         if(tickSize > 0.0 && tickValue > 0.0 && volume > 0.0)
-           {
-            double priceDiff = (targetMoney * tickSize) / (tickValue * volume);
-            double newSl = 0.0;
-            bool needsBeModify = false;
-            if(type == POSITION_TYPE_BUY)
-              {
-               newSl = NormalizeDouble(openPrice + priceDiff, g_symbolDigits);
-               if(currentSl < newSl || currentSl == 0.0) needsBeModify = true;
-              }
-            else if(type == POSITION_TYPE_SELL)
-              {
-               newSl = NormalizeDouble(openPrice - priceDiff, g_symbolDigits);
-               if(currentSl > newSl || currentSl == 0.0) needsBeModify = true;
-              }
-
-            if(needsBeModify)
-              {
-               if(trade.PositionModify(ticket,newSl,currentTp))
-                 {
-                  GlobalVariableSet(accLockKey,1.0);
-                  Log(StringFormat("[MGMT][LOCK] Account profit lock moved for ticket=%I64u",ticket));
-                  string reasonStr = StringFormat("PROFIT_$%.2f_SL_%.2f", profitMoney, newSl);
-                  LogToCSV("ACCOUNT_PROFIT_LOCK",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),reasonStr);
-                 }
-              }
-            else
-              {
-               GlobalVariableSet(accLockKey,1.0);
-              }
-           }
-        }
-     }
-
-   string trailStartKey = BuildStateKey("trailstart",ticket);
-   bool isTrailActive = (GlobalVariableCheck(trailStartKey) && GlobalVariableGet(trailStartKey) >= 1.0);
-
-   string lockKey = BuildStateKey("minprofit",ticket);
-   if(allowStopLossUpdates && !isTrailActive && profitDistance >= (snapshot.atr * InpBreakevenAtrMultiplier) && (!GlobalVariableCheck(lockKey) || GlobalVariableGet(lockKey) < 1.0))
-     {
-      bool needsBeModify = false;
-      double newSl = 0.0;
-      if(type == POSITION_TYPE_BUY)
-        {
-         newSl = NormalizeDouble(openPrice + snapshot.atr * InpMinProfitLockAtr, g_symbolDigits);
-         if(currentSl < newSl || currentSl == 0.0) needsBeModify = true;
-        }
-      else if(type == POSITION_TYPE_SELL)
-        {
-         newSl = NormalizeDouble(openPrice - snapshot.atr * InpMinProfitLockAtr, g_symbolDigits);
-         if(currentSl > newSl || currentSl == 0.0) needsBeModify = true;
-        }
-
-      if(needsBeModify)
-        {
-         if(trade.PositionModify(ticket,newSl,currentTp))
-           {
-            GlobalVariableSet(lockKey,1.0);
-                  Log(StringFormat("[MGMT][LOCK] Minimal profit lock moved for ticket=%I64u",ticket));
-            string reasonStr = StringFormat("PROFIT_%.2f_SL_%.2f", profitDistance, newSl);
-            LogToCSV("MIN_PROFIT_LOCK_TRIGGERED",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),reasonStr);
-           }
-        }
-      else
-        {
-         GlobalVariableSet(lockKey,1.0);
-        }
-     }
-
-
-
-   if(allowStopLossUpdates && !isTrailActive && (profitDistance >= snapshot.atr * InpTrailActivationAtrMultiplier || (GlobalVariableCheck(accLockKey) && GlobalVariableGet(accLockKey) >= 1.0)))
-     {
-      isTrailActive = true;
-      GlobalVariableSet(trailStartKey,1.0);
-      LogToCSV("TRAILING_STARTED",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),"PROFIT_REACHED_ACTIVATION");
-     }
-
-   if(allowStopLossUpdates && isTrailActive && isNewBar)
-     {
-      double trailedSl = currentSl;
-      double trailStep = snapshot.atr * InpTrailStepAtrMultiplier;
-      bool validTrailStep = false;
-      if(type == POSITION_TYPE_BUY)
-        {
-         double candidate = NormalizeDouble(priceNow - snapshot.atr * InpTrailAtrMultiplier,g_symbolDigits);
-         if(profitDistance >= snapshot.atr * InpProfitLockActivationAtr)
-           {
-            double profitLockSl = NormalizeDouble(openPrice + snapshot.atr * InpProfitLockAtr, g_symbolDigits);
-            candidate = MathMax(candidate, profitLockSl);
-           }
-         if(candidate > trailedSl && candidate > openPrice)
-            trailedSl = candidate;
-         if(trailedSl >= currentSl + trailStep)
-            validTrailStep = true;
-        }
-      else if(type == POSITION_TYPE_SELL)
-        {
-         double candidate = NormalizeDouble(priceNow + snapshot.atr * InpTrailAtrMultiplier,g_symbolDigits);
-         if(profitDistance >= snapshot.atr * InpProfitLockActivationAtr)
-           {
-            double profitLockSl = NormalizeDouble(openPrice - snapshot.atr * InpProfitLockAtr, g_symbolDigits);
-            candidate = MathMin(candidate, profitLockSl);
-           }
-         if((trailedSl == 0.0 || candidate < trailedSl) && candidate < openPrice)
-            trailedSl = candidate;
-         if(trailedSl <= currentSl - trailStep || currentSl == 0.0)
-            validTrailStep = true;
-        }
-
-      if(validTrailStep && trailedSl > 0.0)
-        {
-         if(trade.PositionModify(ticket,trailedSl,currentTp))
-           {
-               Log(StringFormat("Trailing stop updated ticket=%I64u",ticket));
-            LogToCSV("TRAILING_UPDATED",SessionToString(snapshot.session),"TRADE_MGMT",priceNow,snapshot.rsi,snapshot.fastEma,snapshot.slowEma,snapshot.atr,snapshot.spread,0,PositionTypeText(type),"TRAILING_STOP_MOVED");
-           }
-        }
-     }
   }
 
 void CleanupStateGlobals()
@@ -563,11 +376,9 @@ void CleanupStateGlobals()
    for(int i = total - 1; i >= 0; i--)
      {
       string gName = GlobalVariableName(i);
-      string prefix = StringFormat("EA_%I64u_", InpMagicNumber);
+      string prefix = StringFormat("EA_%I64u_", (ulong)InpMagicNumber);
       if(StringFind(gName, prefix) == 0)
         {
-         if(StringFind(gName, "TradeCounter") > 0)
-            continue;
          string parts[];
          if(StringSplit(gName, ushort('_'), parts) >= 4)
            {
@@ -596,92 +407,50 @@ void EvaluateEntries()
    if(!CalculateIndicators(entrySnapshot,1))
       return;
 
+   // Session Reset
+   if(entrySnapshot.session != g_currentSession)
+   {
+       g_currentSession = entrySnapshot.session;
+       g_sessionTradeCountTrend = 0;
+       g_sessionTradeCountBreakout = 0;
+       LogTyped("SESSION", StringFormat("New session detected: %s. Trade counters reset.", SessionToString(g_currentSession)));
+   }
+
    DecisionContext buyContext = SelectAndRunStrategy(POSITION_TYPE_BUY,entrySnapshot,true);
    DecisionContext sellContext = SelectAndRunStrategy(POSITION_TYPE_SELL,entrySnapshot,true);
-   buyContext.phase  = "BAR_CLOSE_SIGNAL";
-   sellContext.phase = "BAR_CLOSE_SIGNAL";
-
-   if(!InpAllowBuyTrades)
-     {
-      buyContext.valid = false;
-      buyContext.reason = "BUY_DISABLED";
-     }
-   if(!InpAllowSellTrades)
-     {
-      sellContext.valid = false;
-      sellContext.reason = "SELL_DISABLED";
-     }
-   if(HasOpenPosition())
-     {
-      buyContext.valid = false;
-      buyContext.reason = "MAX_GLOBAL_TRADES_REACHED";
-      sellContext.valid = false;
-      sellContext.reason = "MAX_GLOBAL_TRADES_REACHED";
-     }
+   
+   if(!InpAllowBuyTrades) { buyContext.valid = false; buyContext.reason = "BUY_DISABLED"; }
+   if(!InpAllowSellTrades) { sellContext.valid = false; sellContext.reason = "SELL_DISABLED"; }
+   
    if(TimeTradeServer() - g_lastTradeTime < InpTradeCooldownSeconds)
      {
-      buyContext.valid = false;
-      buyContext.reason = "COOLDOWN_ACTIVE";
-      sellContext.valid = false;
-      sellContext.reason = "COOLDOWN_ACTIVE";
+      buyContext.valid = false; buyContext.reason = "COOLDOWN_ACTIVE";
+      sellContext.valid = false; sellContext.reason = "COOLDOWN_ACTIVE";
      }
 
-   int buyCount = CountPositions(POSITION_TYPE_BUY);
-   if(HasBuyPosition())
-     {
-      buyContext.valid = false;
-      buyContext.reason = "MAX_BUY_TRADES_REACHED";
-     }
-   else if(buyCount > 0)
-     {
-      bool continuationOk = entrySnapshot.emaBullish && (entrySnapshot.adx > InpAdxThreshold) && entrySnapshot.adxIncreasing;
-      if(!continuationOk) { buyContext.valid = false; buyContext.reason = "NO_CONTINUATION_TREND"; }
-     }
-
-   int sellCount = CountPositions(POSITION_TYPE_SELL);
-   if(HasSellPosition())
-     {
-      sellContext.valid = false;
-      sellContext.reason = "MAX_SELL_TRADES_REACHED";
-     }
-   else if(sellCount > 0)
-     {
-      bool continuationOk = entrySnapshot.emaBearish && (entrySnapshot.adx > InpAdxThreshold) && entrySnapshot.adxIncreasing;
-      if(!continuationOk) { sellContext.valid = false; sellContext.reason = "NO_CONTINUATION_TREND"; }
-     }
-
-   if(g_lastBuyBar == g_lastBarTime)
-     {
-      buyContext.valid = false;
-      buyContext.reason = "BUY_DUPLICATE_BLOCKED";
-     }
-   if(g_lastSellBar == g_lastBarTime)
-     {
-      sellContext.valid = false;
-      sellContext.reason = "SELL_DUPLICATE_BLOCKED";
-     }
-
-   totalSignals++;
-   totalSignals++;
+   totalSignals += 2;
    string buyReasonCode = buyContext.valid ? "VALID" : NormalizeRejectReason(buyContext.reason);
    string sellReasonCode = sellContext.valid ? "VALID" : NormalizeRejectReason(sellContext.reason);
-   LogTyped("CHECK", StringFormat("[%s] BUY check: atr=%.5f spread=%d reason=%s strategy=%s",
-                                  buyContext.strategyName, entrySnapshot.atr, entrySnapshot.spread, buyReasonCode, buyContext.strategyName));
-   LogTyped("CHECK", StringFormat("[%s] SELL check: atr=%.5f spread=%d reason=%s strategy=%s",
-                                  sellContext.strategyName, entrySnapshot.atr, entrySnapshot.spread, sellReasonCode, sellContext.strategyName));
-   if(!buyContext.valid)
-      LogRejection("BUY", buyReasonCode, 0.0, AccountInfoDouble(ACCOUNT_BALANCE));
-   if(!sellContext.valid)
-      LogRejection("SELL", sellReasonCode, 0.0, AccountInfoDouble(ACCOUNT_BALANCE));
+   
+   datetime barTime = iTime(InpTradeSymbol, InpTimeframe, 1);
+   
+   LogTyped("CHECK", StringFormat("[%s] BUY check: barTime=%s atr=%.2f spread=%d reason=%s strategy=%s",
+                                   buyContext.strategyName, TimeToString(barTime), entrySnapshot.atr, (int)entrySnapshot.spread, buyReasonCode, buyContext.strategyName));
+   LogTyped("CHECK", StringFormat("[%s] SELL check: barTime=%s atr=%.2f spread=%d reason=%s strategy=%s",
+                                   sellContext.strategyName, TimeToString(barTime), entrySnapshot.atr, (int)entrySnapshot.spread, sellReasonCode, sellContext.strategyName));
+
+   
+   if(!buyContext.valid && buyReasonCode != "NO_SETUP" && buyReasonCode != "UNCLASSIFIED_REJECTION") 
+       LogTyped("REJECTION", StringFormat("%s rejected: barTime=%s reason=%s lot=%.2f balance=%.2f", "BUY", TimeToString(barTime), buyReasonCode, 0.0, AccountInfoDouble(ACCOUNT_BALANCE)));
+   if(!sellContext.valid && sellReasonCode != "NO_SETUP" && sellReasonCode != "UNCLASSIFIED_REJECTION") 
+       LogTyped("REJECTION", StringFormat("%s rejected: barTime=%s reason=%s lot=%.2f balance=%.2f", "SELL", TimeToString(barTime), sellReasonCode, 0.0, AccountInfoDouble(ACCOUNT_BALANCE)));
 
    if(buyContext.valid)
      {
-      LogToCSV("BAR_CLOSE_SIGNAL",buyContext.sessionName,buyContext.strategyName,buyContext.price,buyContext.rsi,buyContext.ema50,buyContext.ema200,buyContext.atr,buyContext.spread,buyContext.score,buyContext.decision,buyContext.reason);
       ExecuteTrade(buyContext);
      }
    else if(sellContext.valid)
      {
-      LogToCSV("BAR_CLOSE_SIGNAL",sellContext.sessionName,sellContext.strategyName,sellContext.price,sellContext.rsi,sellContext.ema50,sellContext.ema200,sellContext.atr,sellContext.spread,sellContext.score,sellContext.decision,sellContext.reason);
       ExecuteTrade(sellContext);
      }
   }
@@ -694,87 +463,13 @@ void EvaluateTickAndDashboard()
 
    DecisionContext buyContext = SelectAndRunStrategy(POSITION_TYPE_BUY,liveSnapshot,false);
    DecisionContext sellContext = SelectAndRunStrategy(POSITION_TYPE_SELL,liveSnapshot,false);
-   buyContext.phase  = "LIVE_PREVIEW";
-   sellContext.phase = "LIVE_PREVIEW";
-
-   if(!InpAllowBuyTrades)
-     {
-      buyContext.valid = false;
-      buyContext.reason = "BUY_DISABLED";
-     }
-   if(!InpAllowSellTrades)
-     {
-      sellContext.valid = false;
-      sellContext.reason = "SELL_DISABLED";
-     }
-   if(HasOpenPosition())
-     {
-      buyContext.valid = false;
-      buyContext.reason = "MAX_GLOBAL_TRADES_REACHED";
-      sellContext.valid = false;
-      sellContext.reason = "MAX_GLOBAL_TRADES_REACHED";
-     }
-   if(TimeTradeServer() - g_lastTradeTime < InpTradeCooldownSeconds)
-     {
-      buyContext.valid = false;
-      buyContext.reason = "COOLDOWN_ACTIVE";
-      sellContext.valid = false;
-      sellContext.reason = "COOLDOWN_ACTIVE";
-     }
-
-   int buyCount = CountPositions(POSITION_TYPE_BUY);
-   if(HasBuyPosition())
-     {
-      buyContext.valid = false;
-      buyContext.reason = "MAX_BUY_TRADES_REACHED";
-     }
-   else if(buyCount > 0)
-     {
-      bool continuationOk = liveSnapshot.emaBullish && (liveSnapshot.adx > InpAdxThreshold) && liveSnapshot.adxIncreasing;
-      if(!continuationOk) { buyContext.valid = false; buyContext.reason = "NO_CONTINUATION_TREND"; }
-     }
-
-   int sellCount = CountPositions(POSITION_TYPE_SELL);
-   if(HasSellPosition())
-     {
-      sellContext.valid = false;
-      sellContext.reason = "MAX_SELL_TRADES_REACHED";
-     }
-   else if(sellCount > 0)
-     {
-      bool continuationOk = liveSnapshot.emaBearish && (liveSnapshot.adx > InpAdxThreshold) && liveSnapshot.adxIncreasing;
-      if(!continuationOk) { sellContext.valid = false; sellContext.reason = "NO_CONTINUATION_TREND"; }
-     }
-
+   
    DecisionContext current = PickBestDecision(buyContext,sellContext,liveSnapshot);
    UpdateDashboard(current);
-
-   if(InpLogEveryTick)
-      LogToCSV("LIVE_TICK_PREVIEW",current.sessionName,current.strategyName,current.price,current.rsi,current.ema50,current.ema200,current.atr,current.spread,current.score,current.decision,current.reason);
   }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
 {
-    if (trans.type == TRADE_TRANSACTION_HISTORY_ADD && trans.order > 0)
-    {
-        if (HistoryOrderSelect(trans.order)) {
-            if (HistoryOrderGetInteger(trans.order, ORDER_MAGIC) == InpMagicNumber) {
-                long state = HistoryOrderGetInteger(trans.order, ORDER_STATE);
-                if (state == ORDER_STATE_EXPIRED || state == ORDER_STATE_CANCELED) {
-                    long type = HistoryOrderGetInteger(trans.order, ORDER_TYPE);
-                    if (type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_SELL_STOP) {
-                        string comment = HistoryOrderGetString(trans.order, ORDER_COMMENT);
-                        if (StringFind(comment, "GoldEA#") == 0) {
-                            ulong tid = (ulong)StringToInteger(StringSubstr(comment, 7));
-                            LogTyped("RESULT", StringFormat("PENDING_EXPIRED tradeId=%I64u strategy=M5_BREAKOUT", tid));
-                        }
-                    }
-                }
-            }
-        }
-        return;
-    }
-
     if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal <= 0)
         return;
 
@@ -790,32 +485,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
     ENUM_DEAL_ENTRY entryType = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
     
     if (entryType == DEAL_ENTRY_IN)
-    {
-        long orderTk = HistoryDealGetInteger(trans.deal, DEAL_ORDER);
-        if (HistoryOrderSelect(orderTk)) {
-            long oType = HistoryOrderGetInteger(orderTk, ORDER_TYPE);
-            if (oType == ORDER_TYPE_BUY_STOP || oType == ORDER_TYPE_SELL_STOP) {
-                string comment = HistoryOrderGetString(orderTk, ORDER_COMMENT);
-                ulong tid = 0;
-                if (StringFind(comment, "GoldEA#") == 0) {
-                    tid = (ulong)StringToInteger(StringSubstr(comment, 7));
-                }
-                double price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
-                string dirStr = (HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BUY) ? "BUY" : "SELL";
-                
-                ulong posId = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
-                double sl = 0.0, tp = 0.0;
-                if (PositionSelectByTicket(posId)) {
-                    sl = PositionGetDouble(POSITION_SL);
-                    tp = PositionGetDouble(POSITION_TP);
-                }
-                ulong displayId = (tid > 0) ? tid : posId;
-                LogTyped("EXECUTION", StringFormat("%s executed: tradeId=%I64u entry=%.2f sl=%.2f tp=%.2f strategy=M5_BREAKOUT_FILLED",
-                                                   dirStr, displayId, price, sl, tp));
-            }
-        }
         return;
-    }
 
     if(entryType != DEAL_ENTRY_OUT)
         return;
@@ -825,19 +495,30 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
                      + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
 
     ulong posId = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+    ulong tradeId = 0;
+    string tradeIdKey = BuildStateKey("tradeid", posId);
+    if(GlobalVariableCheck(tradeIdKey))
+        tradeId = (ulong)GlobalVariableGet(tradeIdKey);
 
-    if(netProfit < 0.0)
+    string resultType = "EXIT";
+    if(netProfit < 0.0) { totalLosses++; resultType = "STOP_LOSS_HIT"; }
+    else if(netProfit > 0.0) { totalWins++; resultType = "TAKE_PROFIT_HIT"; }
+    else resultType = "BREAKEVEN";
+
+    TradeContext *tCtx = NULL;
+    ulong lookupKey = (tradeId > 0 ? tradeId : posId);
+    if(g_tradeContextMap.TryGetValue(lookupKey, tCtx) && tCtx != NULL)
     {
-        totalLosses++;
-        LogTyped("RESULT", StringFormat("STOP LOSS HIT tradeId=%I64u profit=%.2f", posId, netProfit));
-    }
-    else if(netProfit > 0.0)
-    {
-        totalWins++;
-        LogTyped("RESULT", StringFormat("TAKE PROFIT HIT tradeId=%I64u profit=%.2f", posId, netProfit));
+        LogTyped("RESULT", StringFormat("[%s] %s tradeId=%I64u profit=%.2f", 
+                                       tCtx.strategy, resultType, lookupKey, netProfit));
+        delete tCtx;
+        g_tradeContextMap.Remove(lookupKey);
     }
     else
-        LogTyped("RESULT", StringFormat("BREAKEVEN tradeId=%I64u profit=%.2f", posId, netProfit));
+    {
+        LogTyped("RESULT", StringFormat("[UNKNOWN] %s tradeId=%I64u profit=%.2f", 
+                                       resultType, lookupKey, netProfit));
+    }
 
     LogStatsIfDue();
 }

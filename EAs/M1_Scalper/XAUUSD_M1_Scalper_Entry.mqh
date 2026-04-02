@@ -130,8 +130,9 @@ bool AdaptiveFilterCheck(string &reason, double atr, double emaFast, double emaS
     }
     
     // 4. CANDLE QUALITY FILTER
-    double body = MathAbs(rates[0].close - rates[0].open);
-    if(body < atr * 0.3)
+    double bod = MathAbs(rates[0].close - rates[0].open);
+    double rng = rates[0].high - rates[0].low;
+    if(rng > 0 && bod < rng * 0.6)
     {
         reason = "WEAK_CANDLE_DYNAMIC";
         return false;
@@ -140,10 +141,7 @@ bool AdaptiveFilterCheck(string &reason, double atr, double emaFast, double emaS
     // 5. BREAKOUT QUALITY FILTER
     if(isBreakout)
     {
-        // Assuming breakout size is the distance from the breakout level to the current price
-        // This check is better done inside the breakout logic itself.
-        // For now, we'll just check the candle body again.
-        if(body < atr * 0.5)
+        if(bod < atr * 0.5)
         {
             reason = "WEAK_BREAKOUT_DYNAMIC";
             return false;
@@ -204,13 +202,13 @@ bool CheckLiquiditySweep(int direction, StrategyContext &ctx)
 }
 
 //+------------------------------------------------------------------+
-//| ValidateEntry - Evaulates all strategies and returns signals     |
+//| ValidateEntry - Evaluates all strategies and returns signals     |
 //+------------------------------------------------------------------+
 void ValidateEntry(StrategySignal &signals[])
 {
     // Initialize signals
-    ArrayResize(signals, 4);
-    for(int i = 0; i < 4; i++)
+    ArrayResize(signals, 3);
+    for(int i = 0; i < 3; i++)
     {
         signals[i].valid = false;
         signals[i].isStrong = false;
@@ -218,8 +216,7 @@ void ValidateEntry(StrategySignal &signals[])
     }
     signals[0].name = "M1_EMA_PULLBACK";
     signals[1].name = "M1_BREAKOUT";
-    signals[2].name = "M1_REVERSAL";
-    signals[3].name = "M1_LIQUIDITY_SWEEP";
+    signals[2].name = "M1_LIQUIDITY_SWEEP";
 
 
     MqlRates rates[];
@@ -250,18 +247,16 @@ void ValidateEntry(StrategySignal &signals[])
         atrAvgValue = sum / 20.0;
     }
 
-    const double MIN_ATR_VALUE = 1.0;
-    if (atrValue < MIN_ATR_VALUE)
+    // --- ATR QUALITY FILTER ---
+    double pointSize = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    if (pointSize <= 0.0) return;
+
+    if (atrValue < InpMinAtrPoints * pointSize)
     {
         return;
     }
 
     long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-    double pointSize = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    if (pointSize <= 0.0)
-    {
-        return;
-    }
     long dynamicSpreadMax = (long)((atrValue * 0.25) / pointSize);
     long maxAllowedSpread = MathMax((long)InpMaxSpreadPoints, dynamicSpreadMax);
     maxAllowedSpread = MathMax(maxAllowedSpread, 500);
@@ -301,10 +296,8 @@ void ValidateEntry(StrategySignal &signals[])
             if (rates[i].low < lowestLow) lowestLow = rates[i].low;
         }
 
-        MqlRates currentCandle[];
-        CopyRates(_Symbol, _Period, 0, 1, currentCandle);
-        double candleBody = MathAbs(currentCandle[0].close - currentCandle[0].open);
-        double candleRange = currentCandle[0].high - currentCandle[0].low;
+        double candleBody = MathAbs(rates[0].close - rates[0].open);
+        double candleRange = rates[0].high - rates[0].low;
         bool isStrongCandle = (candleRange > 0 && (candleBody / candleRange) > 0.6);
 
         bool isAtrExpanding = atrValue > atrAvgValue * 1.2;
@@ -335,53 +328,74 @@ void ValidateEntry(StrategySignal &signals[])
         }
     }
 
-    // --- STRATEGY 3: REVERSAL (RSI extreme + engulfing) ---
+    // --- STRATEGY 3: LIQUIDITY SWEEP ---
+    StrategyContext liqCtx;
+    if (CheckLiquiditySweep(POSITION_TYPE_BUY, liqCtx))
+    {
+        signals[2].valid = true;
+        signals[2].direction = POSITION_TYPE_BUY;
+        signals[2].strength = 2.0; // Higher strength for override
+        signals[2].isStrong = true;
+    }
+    if (CheckLiquiditySweep(POSITION_TYPE_SELL, liqCtx))
+    {
+        signals[2].valid = true;
+        signals[2].direction = POSITION_TYPE_SELL;
+        signals[2].strength = 2.0; // Higher strength for override
+        signals[2].isStrong = true;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| DetectReversalSignal - RSI extreme + engulfing logic             |
+//+------------------------------------------------------------------+
+bool DetectReversalSignal(ENUM_POSITION_TYPE &direction, double &strengthScore)
+{
+    MqlRates rates[];
+    if (CopyRates(_Symbol, _Period, 0, 3, rates) < 3) return false;
+    ArraySetAsSeries(rates, true);
+
+    double rsiValue = 0.0;
+    if (!GetIndicatorValue(g_rsiHandle, 1, rsiValue)) return false;
+
     bool bullEngulfing = (rates[2].close < rates[2].open) && (rates[1].close > rates[1].open) && 
                          (rates[1].close >= rates[2].open) && (rates[1].open <= rates[2].close);
     bool bearEngulfing = (rates[2].close > rates[2].open) && (rates[1].close < rates[1].open) && 
                          (rates[1].close <= rates[2].open) && (rates[1].open >= rates[2].close);
 
+    direction = (ENUM_POSITION_TYPE)-1;
+    strengthScore = 0.0;
+
     if ((rsiValue < 30.0) && bullEngulfing)
     {
-        signals[2].valid = true;
-        signals[2].direction = POSITION_TYPE_BUY;
-        signals[2].strength = 1.0;
-        signals[2].isWeak = true;
+        direction = POSITION_TYPE_BUY;
     }
-    if ((rsiValue > 70.0) && bearEngulfing)
+    else if ((rsiValue > 70.0) && bearEngulfing)
     {
-        signals[2].valid = true;
-        signals[2].direction = POSITION_TYPE_SELL;
-        signals[2].strength = 1.0;
-        signals[2].isWeak = true;
+        direction = POSITION_TYPE_SELL;
     }
 
-    // --- STRATEGY 4: LIQUIDITY SWEEP ---
-    StrategyContext liqCtx;
-    if (CheckLiquiditySweep(POSITION_TYPE_BUY, liqCtx))
+    if(direction != -1)
     {
-        signals[3].valid = true;
-        signals[3].direction = POSITION_TYPE_BUY;
-        signals[3].strength = 2.0; // Higher strength for override
-        signals[3].isStrong = true;
-        // If reversal is in the same direction, it's no longer weak
-        if(signals[2].valid && signals[2].direction == POSITION_TYPE_BUY)
-        {
-            signals[2].isWeak = false;
-        }
+        // RSI extreme distance score
+        double rsiScore = (direction == POSITION_TYPE_BUY) ? (30.0 - rsiValue) : (rsiValue - 70.0);
+        rsiScore = MathMax(0, rsiScore) / 10.0; // 0 to 3 scale (e.g. 20 RSI is 10/10=1, 10 RSI is 20/10=2)
+
+        // Candle body size score
+        double bodySize = MathAbs(rates[1].close - rates[1].open);
+        double pointSize = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+        double bodyScore = (bodySize / (100 * pointSize)); // scale based on pips
+
+        // Wick rejection score
+        double lowerWick = MathMin(rates[1].open, rates[1].close) - rates[1].low;
+        double upperWick = rates[1].high - MathMax(rates[1].open, rates[1].close);
+        double wickScore = (direction == POSITION_TYPE_BUY) ? (lowerWick / (50 * pointSize)) : (upperWick / (50 * pointSize));
+
+        strengthScore = 1.0 + rsiScore + bodyScore + wickScore;
+        return true;
     }
-    if (CheckLiquiditySweep(POSITION_TYPE_SELL, liqCtx))
-    {
-        signals[3].valid = true;
-        signals[3].direction = POSITION_TYPE_SELL;
-        signals[3].strength = 2.0; // Higher strength for override
-        signals[3].isStrong = true;
-        // If reversal is in the same direction, it's no longer weak
-        if(signals[2].valid && signals[2].direction == POSITION_TYPE_SELL)
-        {
-            signals[2].isWeak = false;
-        }
-    }
+
+    return false;
 }
 
 #endif // XAUUSD_M1_SCALPER_ENTRY_MQH

@@ -39,7 +39,7 @@ from typing import Iterable
 
 TIMESTAMP_RE = re.compile(r"(?P<ts>\d{4}\.\d{2}\.\d{2} \d{2}:\d{2}:\d{2})")
 EA_PREFIX_RE = re.compile(
-    r"\[(?P<ea_type>M1|M1_SCALPER|M5)\]\[GoldEA\](?:\[(?P<log_type>[A-Z_]+)\])?\s*"
+    r"\[(?P<ea_type>M1|M1_SCALPER|M5|M1_QUICKHANDS)\]\[GoldEA\](?:\[(?P<log_type>[A-Z_]+)\])?\s*"
 )
 GENERIC_DEAL_RE = re.compile(
     r"""
@@ -68,11 +68,13 @@ CHECK_RE = re.compile(
 )
 EXEC_RE = re.compile(
     r"""
+    (?:\[(?P<strategy_prefix>[^\]]+)\]\s+)?
     (?P<side>BUY|SELL)\s+(?P<exec_type>executed|pending):
     (?P<body>.*)
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+
 RESULT_RE = re.compile(
     r"""
     (?:
@@ -81,8 +83,9 @@ RESULT_RE = re.compile(
         (?P<be>BREAKEVEN(?:\s+HIT)?)|
         (?P<partial>PARTIAL\s+CLOSE(?:D)?)|
         (?P<skip>Trade\s+skipped)|
-        (?P<trail>Trailing\s+stop\s+updated)|
+        (?P<trail>(?:Trailing\s+stop\s+updated|TRAIL(?:ING)?(?:\s+|_)UPDATE(?:D)?))|
         (?P<pending_expired>PENDING_EXPIRED)|
+        (?P<rev_early_exit>EARLY_EXIT_REVERSAL)|
         (?P<other>.*)
     )
     """,
@@ -104,7 +107,7 @@ LEGACY_REJECT_RE = re.compile(r"\b(?P<side>BUY|SELL)\s+REJECTED\b", re.IGNORECAS
 SCORE_INLINE_RE = re.compile(r"(?:score\s*=\s*|score\s*:\s*)([-\d.]+)", re.IGNORECASE)
 ATR_INLINE_RE = re.compile(r"(?:atr\s*=\s*|atr\s*:\s*)([-\d.]+)", re.IGNORECASE)
 VALID_REASONS = {"VALID", "READY", "ENTRY_READY", "SETUP_VALID", "SETUP_VALID_OVERRIDE", "EXECUTED"}
-LOG_TYPES = {"CHECK", "EXECUTION", "REJECTION", "RESULT", "STATS"}
+LOG_TYPES = {"CHECK", "EXECUTION", "REJECTION", "RESULT", "STATS", "MGMT"}
 
 
 @dataclass
@@ -128,7 +131,16 @@ class Event:
     profit: float | None
     risk: float | None
     r_multiple: float | None
-    raw: str
+    pattern: str = ""
+    locked_r: float | None = None
+    sl_struct: float | None = None
+    sl_atr: float | None = None
+    sl_final: float | None = None
+    sl_source: str = ""
+    locked_profit: float | None = None
+    step: int | None = None
+    bar_time: str | None = None
+    raw: str = ""
 
 
 @dataclass
@@ -143,9 +155,11 @@ class TradeLifecycle:
     exit_price: float | None
     exit_time: str
     profit: float | None
+    strategy: str
     result: str
     risk: float | None
     r_multiple: float | None
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -336,6 +350,15 @@ def build_event(
     profit: float | None = None,
     risk: float | None = None,
     r_multiple: float | None = None,
+    pattern: str = "",
+    locked_r: float | None = None,
+    sl_struct: float | None = None,
+    sl_atr: float | None = None,
+    sl_final: float | None = None,
+    sl_source: str = "",
+    locked_profit: float | None = None,
+    step: int | None = None,
+    bar_time: str | None = None,
     raw: str = "",
 ) -> Event:
     return Event(
@@ -358,6 +381,15 @@ def build_event(
         profit=profit,
         risk=risk,
         r_multiple=r_multiple,
+        pattern=pattern,
+        locked_r=locked_r,
+        sl_struct=sl_struct,
+        sl_atr=sl_atr,
+        sl_final=sl_final,
+        sl_source=sl_source,
+        locked_profit=locked_profit,
+        step=step,
+        bar_time=bar_time,
         raw=raw.strip(),
     )
 
@@ -377,6 +409,7 @@ def parse_log_file(path: Path) -> list[Event]:
                 parse_check_line(content, path, ea_type, timestamp)
                 or parse_execution_line(content, path, ea_type, timestamp)
                 or parse_result_line(content, path, ea_type, timestamp)
+                or parse_mgmt_line(content, path, ea_type, timestamp)
                 or parse_stats_line(content, path, ea_type, timestamp)
             )
             if event:
@@ -472,6 +505,11 @@ def parse_check_line(line: str, source_file: Path, ea_type: str, timestamp: str)
             tp=parse_float(kv.get("tp")),
             reason=reason,
             result=result,
+            pattern=kv.get("pattern", ""),
+            sl_struct=parse_float(kv.get("slstruct")),
+            sl_atr=parse_float(kv.get("slatr")),
+            sl_final=parse_float(kv.get("slfinal")),
+            bar_time=kv.get("bartime") or kv.get("bar_time"),
         )
 
     body = match.group("body")
@@ -502,6 +540,11 @@ def parse_check_line(line: str, source_file: Path, ea_type: str, timestamp: str)
         tp=tp,
         reason=reason,
         result=result,
+        pattern=kv.get("pattern", ""),
+        sl_struct=parse_float(kv.get("slstruct")),
+        sl_atr=parse_float(kv.get("slatr")),
+        sl_final=parse_float(kv.get("slfinal")),
+        bar_time=kv.get("bartime") or kv.get("bar_time"),
     )
 
 
@@ -527,7 +570,7 @@ def parse_execution_line(line: str, source_file: Path, ea_type: str, timestamp: 
         source_file=source_file,
         action=action,
         trade_type=match.group("side"),
-        strategy=kv.get("strategy", ""),
+        strategy=match.group("strategy_prefix") or kv.get("strategy", ""),
         score=parse_float(kv.get("score")),
         atr=parse_float(kv.get("atr")),
         price=parse_float(kv.get("entry") or kv.get("price")),
@@ -536,7 +579,9 @@ def parse_execution_line(line: str, source_file: Path, ea_type: str, timestamp: 
         reason=extract_reason_from_text(body, default=kv.get("reason", "EXECUTED")),
         result=result,
         trade_id=trade_id_match.group(1) if trade_id_match else "",
+        sl_source=kv.get("slsource", ""),
     )
+
 
 
 def parse_result_line(line: str, source_file: Path, ea_type: str, timestamp: str) -> Event | None:
@@ -544,6 +589,13 @@ def parse_result_line(line: str, source_file: Path, ea_type: str, timestamp: str
     match = RESULT_RE.search(line)
     if not match:
         return None
+
+    # Extract strategy from prefix if present: [STRATEGY]
+    strategy = ""
+    strategy_match = re.search(r"^\[(?P<strat>[^\]]+)\]", line)
+    if strategy_match:
+        strategy = strategy_match.group("strat").strip()
+
 
     symbol = extract_symbol(line) or extract_symbol(source_file.name)
     trade_match = TRADE_ID_RE.search(line)
@@ -578,6 +630,8 @@ def parse_result_line(line: str, source_file: Path, ea_type: str, timestamp: str
         action, result = "PENDING_EXPIRED", "EXPIRED"
     elif match.group("trail"):
         action, result = "TRAILING_UPDATE", "MANAGEMENT"
+    elif match.group("rev_early_exit"):
+        action, result = "EARLY_EXIT_REVERSAL", "CLOSED"
     
     # Do not parse execution lines here, they are handled by parse_execution_line
     if "EXECUTED" in line.upper():
@@ -592,11 +646,39 @@ def parse_result_line(line: str, source_file: Path, ea_type: str, timestamp: str
         source_file=source_file,
         action=action,
         trade_type=side_match.group(1) if side_match else "",
+        strategy=strategy,
         reason=reason or action,
         result=result,
         trade_id=trade_id,
         profit=profit,
     )
+ 
+ 
+def parse_mgmt_line(line: str, source_file: Path, ea_type: str, timestamp: str) -> Event | None:
+    # 1. R-Multiple BE Move (New Model)
+    if "SL_MOVED_TO_1R" in line.upper():
+        kv = parse_kv_pairs(line)
+        trade_id = kv.get("tradeid", "")
+        R = parse_float(kv.get("r"))
+        new_sl = parse_float(kv.get("newsl"))
+        
+        return build_event(
+            ea_type=ea_type,
+            timestamp=timestamp,
+            symbol=extract_symbol(line) or extract_symbol(source_file.name),
+            source_file=source_file,
+            action="SL_MOVED_TO_1R",
+            trade_id=trade_id,
+            locked_r=1.0,
+            result="MANAGEMENT",
+        )
+    
+    # 2. Legacy Trailing (Removed but kept for historical logs if needed, or strictly following prompt)
+    if "TRAIL_UPDATE" in line.upper() and False: # Disabled as per prompt
+        return None
+        
+    return None
+
 
 
 def parse_stats_line(line: str, source_file: Path, ea_type: str, timestamp: str) -> Event | None:
@@ -880,10 +962,12 @@ def build_trade_lifecycle(events: list[Event]) -> list[TradeLifecycle]:
                 exit_price=result_event.price,
                 exit_time=result_event.timestamp,
                 profit=result_event.profit,
+                strategy=exec_event.strategy,
                 result=trade_result,
                 risk=risk,
                 r_multiple=r_multiple,
             )
+
         )
 
     return trades
@@ -938,6 +1022,25 @@ def summarize(events: list[Event]) -> dict[str, object]:
     pending_filled = len([e for e in events if e.action == "TRADE_EXECUTED" and "FILLED" in e.strategy.upper()])
     breakout_scan_inactive = len([e for e in events if e.action == "STATS_SCAN" and "active=false" in e.reason.lower()])
     
+    # Entry SL Validation
+    entry_sl_violations = len([e for e in executed_events if e.sl_final is not None and e.sl_final < 4.0])
+    weak_candle_rejections = rejection_counter.get("WEAK_CANDLE_BODY", 0)
+    
+    # Duplicate Entry Check (Cluster detection on same bar)
+    bar_entry_counter = Counter()
+    duplicate_bar_entries = 0
+    for e in executed_events:
+        if e.bar_time:
+            key = (e.bar_time, e.side)
+            bar_entry_counter[key] += 1
+            if bar_entry_counter[key] > 1:
+                duplicate_bar_entries += 1
+
+    # Reversal Intelligence tracking
+    reversal_sl_tighten = len([e for e in events if "SL_TIGHTENED_REVERSAL" in e.raw.upper()])
+    reversal_tp_extend = len([e for e in events if "TP_EXTENDED_REVERSAL" in e.raw.upper()])
+    reversal_early_exit = len([e for e in events if "EARLY_EXIT_REVERSAL" in e.raw.upper()])
+    
     execution_rate = (total_executed / total_signals * 100.0) if total_signals else 0.0
     rejection_rate = (total_skipped / total_signals * 100.0) if total_signals else 0.0
     win_rate = (len(win_trades) / total_resolved * 100.0) if total_resolved else 0.0
@@ -970,6 +1073,15 @@ def summarize(events: list[Event]) -> dict[str, object]:
     max_r = max(r_values) if r_values else None
     min_r = min(r_values) if r_values else None
     
+    # QuickHands R-Management Metrics
+    sl_move_events = len([e for e in events if e.action == "SL_MOVED_TO_1R"])
+    sl_to_1r_rate = sl_move_events / total_trades if total_trades > 0 else 0.0
+
+    # Old metrics (empty for new version)
+    locked_r_values = []
+    locked_profit_values = []
+    step_values = []
+
     r_distribution = {
         "<= -1R": len([r for r in r_values if r <= -0.9]),
         "-1R to 0R": len([r for r in r_values if -0.9 < r < 0]),
@@ -988,6 +1100,13 @@ def summarize(events: list[Event]) -> dict[str, object]:
         rejection_counter=rejection_counter,
         session_counter=session_counter,
     )
+
+    # Hybrid SL Metrics
+    all_sl_struct = [e.sl_struct for e in executed_events if e.sl_struct is not None]
+    all_sl_atr = [e.sl_atr for e in executed_events if e.sl_atr is not None]
+    all_sl_final = [e.sl_final for e in executed_events if e.sl_final is not None]
+    
+    struct_vs_atr_ratios = [s / a for s, a in zip(all_sl_struct, all_sl_atr) if a and a > 0]
     if total_resolved and len(r_values) != total_resolved:
         insights.append(
             f"R coverage gap: {len(r_values)}/{total_resolved} resolved trades have computable R."
@@ -1038,13 +1157,32 @@ def summarize(events: list[Event]) -> dict[str, object]:
         "pending_expired": pending_expired,
         "pending_filled": pending_filled,
         "breakout_scan_inactive": breakout_scan_inactive,
+        "entry_sl_violations": entry_sl_violations,
+        "weak_candle_rejections": weak_candle_rejections,
+        "overextension_rejections": rejection_counter.get("C3_OVEREXTENDED", 0),
+        "duplicate_bar_entries": duplicate_bar_entries,
+        "sl_move_to_1r_count": sl_move_events,
+        "sl_to_1r_rate": sl_to_1r_rate,
+        "avg_sl_struct": round(safe_average(all_sl_struct), 2) if all_sl_struct else None,
+        "avg_sl_atr": round(safe_average(all_sl_atr), 2) if all_sl_atr else None,
+        "avg_sl_final": round(safe_average(all_sl_final), 2) if all_sl_final else None,
+        "avg_struct_vs_atr_ratio": round(safe_average(struct_vs_atr_ratios), 2) if struct_vs_atr_ratios else None,
         "top_rejection_reasons": rejection_counter.most_common(10),
         "rejection_reason_distribution": rejection_reason_distribution,
         "reasons": reason_counter.most_common(),
         "sessions": session_counter.most_common(),
         "actions": action_counter.most_common(),
+        "reversal_sl_tighten": reversal_sl_tighten,
+        "reversal_tp_extend": reversal_tp_extend,
+        "reversal_early_exit": reversal_early_exit,
+        "avg_locked_r": safe_average(locked_r_values),
+        "max_locked_r": max(locked_r_values) if locked_r_values else 0.0,
+        "avg_locked_profit": safe_average(locked_profit_values),
+        "max_locked_profit": max(locked_profit_values) if locked_profit_values else 0.0,
+        "avg_step_locked": safe_average(step_values),
         "closed_trades_count": len(resolved_trades),
         "lifecycle_validation_ok": bool(total_resolved == len(r_values) or len(r_values) <= total_resolved),
+        "sl_source_counts": Counter(e.sl_source for e in executed_events if e.sl_source),
         "insights": insights,
     }
 
@@ -1054,6 +1192,7 @@ def split_by_ea(events: list[Event]) -> dict[str, list[Event]]:
     data = {
         "M1_SCALPER": [],
         "M5": [],
+        "M1_QUICKHANDS": [],
     }
     for event in events:
         if event.ea_type in data:
@@ -1151,7 +1290,45 @@ def print_summary(title: str, summary: dict[str, object]) -> None:
     avg_atr = summary["average_atr"]
     print(f"Average Score (Trades): {avg_score if avg_score is not None else 'N/A'}")
     print(f"Average ATR: {avg_atr if avg_atr is not None else 'N/A'}")
+    if summary.get("entry_sl_violations"):
+        print(f"!!! ENTRY SL VIOLATIONS (<$4): {summary['entry_sl_violations']} !!!")
+    if summary.get("duplicate_bar_entries"):
+        print(f"!!! DUPLICATE BAR ENTRIES (Violation): {summary['duplicate_bar_entries']} !!!")
+    if summary.get("weak_candle_rejections"):
+        print(f"Weak Candle Rejections: {summary['weak_candle_rejections']}")
+    if summary.get("overextension_rejections"):
+        print(f"C3 Overextension Rejections: {summary['overextension_rejections']}")
     print()
+
+    print("--- Reversal Management (Intelligence) ---")
+    print(f"SL Tightened (Reversal): {summary['reversal_sl_tighten']}")
+    print(f"TP Extended (Reversal):  {summary['reversal_tp_extend']}")
+    print(f"Early Exits (Reversal):  {summary['reversal_early_exit']}")
+    print()
+
+    if summary.get("avg_locked_r") is not None or summary.get("sl_to_1r_rate") is not None:
+        print("--- QuickHands R-Model Management ---")
+        if summary.get("sl_to_1r_rate") is not None:
+            print(f"SL Move to 1R Count: {summary['sl_move_to_1r_count']}")
+            print(f"SL Move to 1R Rate:  {summary['sl_to_1r_rate']:.1%}")
+        
+        if summary.get("avg_locked_r") is not None:
+            print(f"Avg Locked R: {summary['avg_locked_r']:.2f}")
+            print(f"Max Locked R: {summary['max_locked_r']:.2f}")
+        if summary.get("avg_locked_profit") is not None:
+            print(f"Avg Locked Profit ($): {summary['avg_locked_profit']:.2f}")
+            print(f"Max Locked Profit ($): {summary['max_locked_profit']:.2f}")
+        if summary.get("avg_step_locked") is not None:
+            print(f"Avg Locked Step ($):   {summary['avg_step_locked']:.2f}")
+        print()
+
+    if summary.get("avg_sl_final") is not None:
+        print("--- QuickHands Hybrid SL Metrics ---")
+        print(f"Avg SL (Final):    {summary['avg_sl_final']:.2f}")
+        print(f"Avg SL (Structure): {summary['avg_sl_struct']:.2f}")
+        print(f"Avg SL (ATR):       {summary['avg_sl_atr']:.2f}")
+        print(f"Struct/ATR Ratio:   {summary['avg_struct_vs_atr_ratio']:.2f}")
+        print()
 
     print("Top Rejection Reasons:")
     top_rejections = summary["top_rejection_reasons"]
@@ -1251,6 +1428,15 @@ def export_events_csv(path: Path, events: list[Event]) -> None:
         "profit",
         "risk",
         "r_multiple",
+        "pattern",
+        "locked_r",
+        "sl_struct",
+        "sl_atr",
+        "sl_final",
+        "sl_source",
+        "locked_profit",
+        "step",
+        "bar_time",
         "raw",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -1311,7 +1497,7 @@ def main() -> int:
     data = split_by_ea(all_events)
     summaries: dict[str, dict[str, object]] = {}
 
-    for ea_type in ("M1_SCALPER", "M5"):
+    for ea_type in ("M1_SCALPER", "M5", "M1_QUICKHANDS"):
         ea_events = data.get(ea_type, [])
         if not ea_events:
             continue

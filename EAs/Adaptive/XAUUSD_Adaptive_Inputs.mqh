@@ -11,21 +11,28 @@ enum ENUM_SESSION
 
 enum ENUM_STRATEGY
   {
-   STRATEGY_RANGE,
-   STRATEGY_BREAKOUT,
-   STRATEGY_TREND,
+   STRATEGY_TREND_PULLBACK,
+   STRATEGY_ATR_BREAKOUT,
+   STRATEGY_SMART_REVERSAL_FVG,
    STRATEGY_NONE
   };
 
-enum ENUM_SCORE_MODE
-  {
-   SCORE_DISABLED = 0,
-   SCORE_ENABLED  = 1
-  };
+enum MarketMode
+{
+    MODE_NONE,
+    MODE_TREND,
+    MODE_BREAKOUT
+};
 
 input string           InpTradeSymbol            = "XAUUSDm";
 input ENUM_TIMEFRAMES  InpTimeframe              = PERIOD_M5;
 input ulong            InpMagicNumber            = 26032026;
+
+//--- Market Mode Thresholds
+input double           InpMarketTrendThreshold   = 50.0; // Points difference between EMA20 and EMA50
+input double           InpMarketTrendAdx         = 22.0;
+input double           InpMarketBreakoutAdx      = 28.0;
+input double           InpMarketBreakoutAtrMultiplier = 1.3;
 
 input int              InpFastEmaPeriod          = 20;
 input int              InpSlowEmaPeriod          = 50;
@@ -80,27 +87,15 @@ input int              InpLondonEndHour          = 13;
 input int              InpNewYorkStartHour       = 13;
 input int              InpNewYorkEndHour         = 22;
 
-//--- Session Strategies
-input double           InpRangeProximityFactor   = 0.5;  // ATR multiplier for Asian range proximity
-input double           InpRangeRsiBuyMax         = 40.0; // Max RSI for Asian range buy
-input double           InpRangeRsiSellMin        = 60.0; // Min RSI for Asian range sell
-input double           InpBreakoutCandleFactor   = 0.7;  // ATR multiplier for London breakout candle size
-
-input ENUM_SCORE_MODE  InpUseScoring             = SCORE_ENABLED;
-input int              InpMinimumScore           = 80;
-input int              InpWeightTrend            = 30;
-input int              InpWeightEmaAlignment     = 25;
-input int              InpWeightRsi              = 20;
-input int              InpWeightRangeBB          = 50;
-input int              InpWeightBreakout         = 50;
-input int              InpWeightPullback         = 25;
-
 input bool             InpEnableDebugPrints      = true;
 input bool             InpEnableCSVLogging       = true;
 input bool             InpEnableDashboard        = true;
+input bool             InpEnableSmartReversalFVG = true;
 input bool             InpLogEveryTick           = false;
 input int              InpLogRetentionDays       = 7;
+input int              InpMinimumScore           = 60;      // Minimum score to highlight on dashboard
 input bool             InpEnablePushAlerts       = false;
+
 input bool             InpEnableEmailAlerts      = false;
 
 #endif // XAUUSD_ADAPTIVE_INPUTS_MQH

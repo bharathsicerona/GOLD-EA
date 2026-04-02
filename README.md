@@ -11,6 +11,7 @@ The project is organized into a clean and modular structure to ensure clarity an
 ├── EAs/
 │   ├── Adaptive/         # M5 Adaptive Multi-Factor EA
 │   ├── M1_Scalper/       # M1 High-Risk Scalper EA
+│   ├── HLTEM/            # M15->M1 Multitimeframe Liquidity EA
 │   ├── Beginner/         # Beginner-friendly Trend Pullback EA
 │   └── Include/          # Shared MQL5 library files
 ├── scripts/
@@ -35,25 +36,32 @@ This project includes three distinct Expert Advisors. Each has its own dedicated
 
 -   **Folder:** `EAs/Adaptive/`
 -   **Role:** Capital Stabilizer (lower-frequency, higher-quality trades on M5).
--   **Strategy:** A sophisticated multi-factor model that adapts to changing market conditions by selecting from several independent strategies based on the active trading session:
-    -   **`M5_RANGE` (Asian Session):** Buys on RSI < 35 with bullish candle, sells on RSI > 65 with bearish candle.
-    -   **`M5_BREAKOUT` (London Session):** Places pending orders to capture breakouts of the Asian session high/low.
-    -   **`M5_TREND_PULLBACK`:** Enters on pullbacks to the fast EMA in a confirmed trend.
-    -   **`M5_ATR_BREAKOUT` (London/NY):** Enters on high-momentum breakouts confirmed by ADX and ATR expansion.
+-   **Architecture:** Uses a **Market Mode Engine** to detect the regime (TREND or BREAKOUT) before executing a signal.
+-   **Strategies:**
+    -   **`M5_TREND_PULLBACK`:** Enters on pullbacks to the fast EMA during a detected trend mode.
+    -   **`M5_ATR_BREAKOUT`:** Captures high-momentum breakout events confirmed by ADX and ATR expansion.
+-   **Key Features:**
+    -   **Market Awareness:** Detects market mode first; skips trading if conditions are weak.
+    -   **Hard Pre-filters:** Strict ADX and ATR-based filtering to reduce signal noise.
+    -   **Session Limits:** Enforces a maximum of 2 trend trades and 1 breakout trade per session.
 -   **Risk & Trade Management:**
-    -   Uses the shared `GoldEA_Unified_Risk.mqh` engine, with a special override for `0.01` lot trades to use a `$10` stop loss.
-    -   Features an advanced R-Multiple based trailing stop system to lock in profits at key thresholds (`1R`, `1.5R`, `2R`, `2.5R`).
--   **More Info:** See the `EAs/Adaptive/README.md` for a full breakdown of the strategy and its parameters.
+    -   **Strategy-Specific Risk:** Custom SL/TP ratios per strategy (e.g., 1:2.5 for Trend, 1:4.0 for Breakout).
+    -   **Advanced Trailing:** R-Multiple based trailing stop system optimized for each strategy.
+-   **More Info:** See the [M5 Strategy Documentation](docs/M5_STRATEGY.md) and `EAs/Adaptive/README.md`.
+
 
 ### 2. M1 High-Risk Scalper EA (Capital Booster)
 
 -   **Folder:** `EAs/M1_Scalper/`
 -   **Role:** Capital Booster (higher-frequency scalping on M1).
--   **Strategy:** An aggressive, high-frequency scalping strategy that evaluates four independent entry models (EMA Pullback, Breakout, Reversal, and Liquidity Sweep) on each new bar. It uses a signal interaction engine to process the signals and decide on a final trade action based on a set of rules, including intelligent filtering of weak signals.
+-   **Strategy:** An aggressive, high-frequency scalping strategy that evaluates three core entry models (EMA Pullback, Breakout, and Liquidity Sweep) on each new bar. It uses a signal interaction engine to process the signals and decide on a final trade action.
     -   **`M1_EMA_PULLBACK`:** Enters on a price pullback to the EMA20 in a confirmed trend.
-    -   **`M1_BREAKOUT`:** A tick-level strategy that enters on price breaking recent highs/lows with ATR expansion and strong candle quality. Weak breakouts are filtered out.
-    -   **`M1_REVERSAL`:** Enters on extreme RSI levels combined with a strong engulfing candle pattern. Only considered if aligned with a liquidity sweep.
-    -   **`M1_LIQUIDITY_SWEEP`:** A new strategy that enters after a liquidity sweep, where the price takes out a previous high/low and then reverses. This signal has override priority.
+    -   **`M1_BREAKOUT`:** Enters on price breaking recent highs/lows with ATR expansion and strong candle quality.
+    -   **`M1_LIQUIDITY_SWEEP`:** Enters after a liquidity sweep, where price takes out a previous high/low and then reverses. This signal has override priority.
+-   **Trade Management Intelligence (Reversal Layer):**
+    -   **`M1_REVERSAL`:** Formerly an entry signal, now converted into a management layer. It monitors RSI extremes and engulfing patterns while a trade is open.
+    -   **Against Trade:** Tightens SL aggressively or triggers an `EARLY_EXIT_REVERSAL` if strong reversal patterns appear.
+    -   **Supports Trade:** Extends TP (`TP_EXTENDED_REVERSAL`) to boost profits in strong trend-reversal continuations.
 -   **Key Filters:**
     -   Session restricted to London & New York.
     -   Hard filters for minimum ATR and maximum spread.
@@ -74,6 +82,23 @@ The M1 Scalper now includes an Adaptive Filter Layer that runs before any strate
 -   **Strategy:** A simple, easy-to-understand trend-following strategy that enters on pullbacks to a moving average.
 -   **Risk Model:** Basic, percentage-based risk.
 -   **More Info:** This EA is self-contained in a single file for simplicity and is a great starting point for learning EA development.
+
+### 4. HLTEM (HTF Liquidity to LTF Execution) EA
+
+-   **Folder:** `EAs/HLTEM/`
+-   **Role:** Institutional Liquidity Model (bi-timeframe).
+-   **Architecture:** Uses a **dual-timeframe pipeline** (M15 Context -> M1 Execution).
+-   **Strategy:**
+    -   **HTF Bias (M15):** Detects liquidity sweeps of previous 20-candle highs/lows and confirms via close-based Break of Structure (BOS).
+    -   **LTF Tactics (M1):** Once bias is set, price must enter the HTF Order Block, trigger a swing-based Market Structure Shift (MSS), and confirm via Fair Value Gaps (FVG).
+-   **Key Features:**
+    -   **Institutional Precision:** Synchronizes HTF liquidity raids with LTF tactical entries.
+    -   **Visual Debugging:** Advanced on-chart visualization for Order Blocks (Blue), MSS levels (Green/Red), and FVG zones (Yellow).
+    -   **Rules:** v2 Relaxed mode enables FVG touches for higher trade frequency during testing.
+-   **Risk & Trade Management:**
+    -   **Fixed R-Risk:** Fixed 0.01 lot entries with 2.5R Take Profit targets.
+    -   **Structure-based SL:** Stops are placed behind the FVG edge with a 50-point buffer.
+-   **More Info:** See the [HLTEM Strategy Documentation](docs/HLTEM_STRATEGY.md) and `EAs/HLTEM/README.md`.
 
 ## Installation and Setup
 
@@ -136,6 +161,7 @@ The project includes a powerful Python script (`scripts/analyze_ea_logs.py`) to 
   - `EXECUTION` for order placement
   - `REJECTION` for skipped/blocked trades with explicit reason
   - `RESULT` for SL/TP/BE lifecycle events
+  - `MGMT` for active trade intelligence and management (e.g., Reversal-based tightening)
   - `STATS` for periodic internal counter snapshots
 - Trade lifecycle is fully logged with `tradeId`, `score`, `atr`, `spread`, and `reason` fields.
 - Logs are aligned with `scripts/analyze_ea_logs.py` expectations (`M1_SCALPER` / `M5` prefixes and `BUY|SELL check:` + `BUY|SELL executed:` patterns).

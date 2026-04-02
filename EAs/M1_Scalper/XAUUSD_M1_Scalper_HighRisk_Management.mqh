@@ -155,28 +155,203 @@ void UpdateDynamicTP(const ulong ticket, const double profit, const double initi
 
 
 //+------------------------------------------------------------------+
+//| CalculateTighterSL - Stronger reversal -> tighter SL             |
+//+------------------------------------------------------------------+
+double CalculateTighterSL(ENUM_POSITION_TYPE type, double currentSL, double entry, double strength)
+{
+    double atrValue = 0;
+    if (!GetIndicatorValue(g_atrHandle, 1, atrValue)) return currentSL;
+    
+    double shift = strength * 0.2 * atrValue;
+    double newSL = currentSL;
+    
+    if (type == POSITION_TYPE_BUY)
+    {
+        newSL = currentSL + shift;
+        // Cap it at entry for now if it's too aggressive, or just allow it
+    }
+    else
+    {
+        newSL = currentSL - shift;
+    }
+    return NormalizeDouble(newSL, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+}
+
+//+------------------------------------------------------------------+
+//| ExtendTakeProfitPrice - Extend TP based on reversal strength     |
+//+------------------------------------------------------------------+
+double ExtendTakeProfitPrice(ENUM_POSITION_TYPE type, double currentTP, double strength)
+{
+    double atrValue = 0;
+    if (!GetIndicatorValue(g_atrHandle, 1, atrValue)) return currentTP;
+
+    double shift = strength * 0.5 * atrValue;
+    double newTP = currentTP;
+
+    if (type == POSITION_TYPE_BUY)
+    {
+        newTP = currentTP + shift;
+    }
+    else
+    {
+        newTP = currentTP - shift;
+    }
+    return NormalizeDouble(newTP, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+}
+
+//+------------------------------------------------------------------+
+//| StrategyFeedbackManager - In-trade Signal Management             |
+//+------------------------------------------------------------------+
+void StrategyFeedbackManager(StrategySignal &signals[])
+{
+    if (!PositionSelect(_Symbol)) return;
+
+    long positionType = PositionGetInteger(POSITION_TYPE);
+    double positionProfit = PositionGetDouble(POSITION_PROFIT);
+    ulong ticket = PositionGetInteger(POSITION_TICKET);
+    double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+    double currentSL = PositionGetDouble(POSITION_SL);
+    double currentTP = PositionGetDouble(POSITION_TP);
+    
+    // --- 1. HANDLE REVERSAL SIGNAL (INTELLIGENCE LAYER) ---
+    ENUM_POSITION_TYPE revDir;
+    double revStrength;
+    if (DetectReversalSignal(revDir, revStrength))
+    {
+        // CASE 1: REVERSAL AGAINST TRADE (RISK CONTROL)
+        if (revDir != (ENUM_POSITION_TYPE)positionType)
+        {
+            double initialRisk = 0;
+            g_initialRiskMap.TryGetValue(ticket, initialRisk);
+            double currentProfitR = (initialRisk > 0) ? (positionProfit / initialRisk) : 0;
+
+            // Early exit condition: profit >= 0.5R and strength > 2.0 (STRONG)
+            if (currentProfitR >= 0.5 && revStrength > 2.0)
+            {
+                double finalProfit = positionProfit;
+                trade.PositionClose(ticket);
+                LogTyped("RESULT", StringFormat("EARLY_EXIT_REVERSAL tradeId=%I64u profit=%.2f strength=%.2f profitR=%.2f", ticket, finalProfit, revStrength, currentProfitR));
+                return;
+            }
+            else
+            {
+                double newSL = CalculateTighterSL((ENUM_POSITION_TYPE)positionType, currentSL, entryPrice, revStrength);
+                // Ensure we only move SL in favor of the trade
+                bool canModify = (positionType == POSITION_TYPE_BUY) ? (newSL > currentSL) : (newSL < currentSL);
+                if (canModify && trade.PositionModify(ticket, newSL, currentTP))
+                {
+                    LogTyped("MGMT", StringFormat("SL_TIGHTENED_REVERSAL tradeId=%I64u newSL=%.2f strength=%.2f", ticket, newSL, revStrength));
+                }
+            }
+        }
+        // CASE 2: REVERSAL SUPPORTS TRADE (BOOST MODE)
+        else if (revDir == (ENUM_POSITION_TYPE)positionType)
+        {
+            double newTP = ExtendTakeProfitPrice((ENUM_POSITION_TYPE)positionType, currentTP, revStrength);
+            if (trade.PositionModify(ticket, currentSL, newTP))
+            {
+                LogTyped("MGMT", StringFormat("TP_EXTENDED_REVERSAL tradeId=%I64u newTP=%.2f strength=%.2f", ticket, newTP, revStrength));
+            }
+        }
+    }
+
+    // --- 2. HANDLE OTHER SIGNALS (LEGACY FEEDBACK) ---
+    bool hasNewSameDirectionSignal = false;
+    bool hasNewOppositeDirectionSignal = false;
+    bool hasOppositeLiquiditySweep = false;
+
+    for (int i = 0; i < ArraySize(signals); i++)
+    {
+        if (signals[i].valid)
+        {
+            if (signals[i].direction == positionType)
+            {
+                hasNewSameDirectionSignal = true;
+            }
+            else
+            {
+                hasNewOppositeDirectionSignal = true;
+                if (signals[i].name == "M1_LIQUIDITY_SWEEP")
+                {
+                    hasOppositeLiquiditySweep = true;
+                }
+            }
+        }
+    }
+
+    // CRITICAL RULE — SWEEP AGAINST TRADE
+    if (hasOppositeLiquiditySweep)
+    {
+        LogTyped("SWEEP_OVERRIDE_EXIT", "Immediate exit due to opposite liquidity sweep. Ticket: " + (string)ticket);
+        trade.PositionClose(ticket);
+        return;
+    }
+
+    // SAME DIRECTION SIGNAL
+    if (hasNewSameDirectionSignal)
+    {
+        double initialRisk = 0;
+        g_initialRiskMap.TryGetValue(ticket, initialRisk);
+        if(initialRisk > 0)
+        {
+            // LogTyped("TP_EXTENDED", "TP extended due to new same-direction signal. Ticket: " + (string)ticket);
+            // This is handled by ExtendTakeProfit legacy call in main loop if needed, 
+            // but we've already done reversal-based extension.
+        }
+    }
+    // OPPOSITE SIGNAL
+    else if (hasNewOppositeDirectionSignal)
+    {
+        if (positionProfit > 0)
+        {
+            LogTyped("EARLY_EXIT_CONFLICT", "Early exit with profit due to new opposite signal. Ticket: " + (string)ticket);
+            trade.PositionClose(ticket);
+        }
+        else
+        {
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double newSL = openPrice; // Breakeven
+            
+            if(positionType == POSITION_TYPE_BUY && currentSL < newSL)
+            {
+                LogTyped("SL_TIGHTENED", "SL tightened to breakeven due to new opposite signal. Ticket: " + (string)ticket);
+                trade.PositionModify(ticket, newSL, currentTP);
+            }
+            else if (positionType == POSITION_TYPE_SELL && currentSL > newSL)
+            {
+                LogTyped("SL_TIGHTENED", "SL tightened to breakeven due to new opposite signal. Ticket: " + (string)ticket);
+                trade.PositionModify(ticket, newSL, currentTP);
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
 //| --- Main High-Risk Management Function ---                       |
 //+------------------------------------------------------------------+
 // This function orchestrates the new aggressive trade management logic.
 // It should be called on every tick from the main EA file.
 void ManageHighRiskPosition()
 {
-    if (PositionsTotal() != 1) return; // Function designed for a single open position
+    if (!PositionSelect(_Symbol) || PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) return;
 
-    ulong ticket = PositionGetTicket(0);
-    if (!PositionSelectByTicket(ticket) || PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) return;
-
+    ulong ticket = PositionGetInteger(POSITION_TICKET);
     double profit = PositionGetDouble(POSITION_PROFIT);
-    double initialRisk = 0; // This needs to be calculated and stored when the position is opened.
+    double initialRisk = 0;
+    g_initialRiskMap.TryGetValue(ticket, initialRisk);
 
     // --- Execute Management Logic ---
-    // Note: The order is important. Update SL first to lock profits.
     ManageTrailingStop(ticket, profit);
     
-    // For Dynamic TP, we need the initial risk amount. This should be calculated
-    // and stored when the trade is first opened, perhaps in a global map or by
-    // embedding it in the trade comment. For now, this is a placeholder.
-    // UpdateDynamicTP(ticket, profit, initialRisk);
+    // Process intra-trade signals
+    StrategySignal signals[];
+    ValidateEntry(signals);
+    StrategyFeedbackManager(signals);
+
+    if(initialRisk > 0) {
+        UpdateDynamicTP(ticket, profit, initialRisk);
+        // Note: Legacy ExtendTakeProfit from main file might conflict, so we'll handle it carefully
+    }
 }
 
 #endif // XAUUSD_M1_SCALPER_HIGHRISK_MANAGEMENT_MQH

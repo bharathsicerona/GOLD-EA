@@ -1,126 +1,138 @@
 #ifndef GOLDEA_COMMON_CORE_MQH
 #define GOLDEA_COMMON_CORE_MQH
 
+#include <Generic/HashMap.mqh>
+
+//+------------------------------------------------------------------+
+//| Trade Context Class for Strategy Attribution                     |
+//+------------------------------------------------------------------+
+class TradeContext
+{
+public:
+    string strategy;
+    string side;
+    string eaType; // M1_SCALPER or M5
+    
+    TradeContext() { strategy=""; side=""; eaType=""; }
+    TradeContext(string s, string sd, string eat) { strategy=s; side=sd; eaType=eat; }
+};
+
+// Global map to persist strategy data between EXECUTION and RESULT
+// We use a pointer map to ensure MQL5 compatibility with complex types (strings).
+CHashMap<ulong, TradeContext*> g_tradeContextMap;
+
+#include <Trade/Trade.mqh>
+
+// --- Global Stats and Counters ---
+// [REMOVED DUPLICATE INPUTS] Inputs like InpMagicNumber are managed by main EA input files.
+
 void DebugPrint(const string message)
   {
-   if(InpEnableDebugPrints)
-      Print("[GoldEA] ",message);
+   // Note: InpEnableDebugPrints must be defined in the main EA or its inputs
+   Print("[GoldEA][DEBUG] ", message);
   }
 
 string CurrentTimeText()
   {
-   return TimeToString(TimeTradeServer(),TIME_DATE | TIME_SECONDS);
+   return TimeToString(TimeTradeServer(), TIME_DATE|TIME_MINUTES|TIME_SECONDS);
   }
 
-string BuildGlobalKey(const string label)
+string BuildGlobalKey(string prefix, ulong ticket)
   {
-   return StringFormat("EA_%I64u_%s",InpMagicNumber,label);
+   return StringFormat("EA_%I64u_%s_%I64u", (ulong)InpMagicNumber, prefix, ticket);
   }
 
-string BuildStateKey(const string label,const ulong ticket)
+string BuildStateKey(string prefix, ulong ticket)
   {
-   return StringFormat("EA_%I64u_%s_%I64u",InpMagicNumber,label,ticket);
+   return StringFormat("EA_%I64u_%s_%I64u", (ulong)InpMagicNumber, prefix, ticket);
   }
+
+string CurrentSessionText()
+{
+    MqlDateTime dt;
+    TimeCurrent(dt);
+    int hour = dt.hour;
+    if(hour >= 0 && hour < 8) return "ASIAN";
+    if(hour >= 8 && hour < 14) return "LONDON";
+    if(hour >= 14 && hour < 22) return "NY";
+    return "OFF";
+}
 
 ulong NextTradeId()
-  {
-   string key = BuildGlobalKey("TradeCounter");
-   double current = 0.0;
-   if(GlobalVariableCheck(key))
-      current = GlobalVariableGet(key);
+{
+    long lastId = 0;
+    if(GlobalVariableCheck("GoldEA_LastTradeId"))
+        lastId = (long)GlobalVariableGet("GoldEA_LastTradeId");
+    lastId++;
+    GlobalVariableSet("GoldEA_LastTradeId", (double)lastId);
+    return (ulong)lastId;
+}
 
-   current += 1.0;
-   GlobalVariableSet(key,current);
-   return (ulong)current;
-  }
+double NormalizeVolume(double volume)
+{
+    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double v = MathFloor(volume / step) * step;
+    if(v < minVol) v = minVol;
+    if(v > maxVol) v = maxVol;
+    return NormalizeDouble(v, 2);
+}
 
-double NormalizeVolume(const double volume)
-  {
-   double minLot  = SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MIN);
-   double maxLot  = SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_MAX);
-   double lotStep = SymbolInfoDouble(InpTradeSymbol,SYMBOL_VOLUME_STEP);
+// Fixed signature to match EA usages: handle, shift, value, buffer
+bool GetIndicatorValue(int handle, int shift, double &value, int buffer=0)
+{
+    double arr[];
+    ArraySetAsSeries(arr, true);
+    if(CopyBuffer(handle, buffer, shift, 1, arr) == 1)
+    {
+        value = arr[0];
+        return true;
+    }
+    return false;
+}
 
-   if(minLot <= 0.0)  minLot = 0.01;
-   if(maxLot <= 0.0)  maxLot = 100.0;
-   if(lotStep <= 0.0) lotStep = 0.01;
+// Unified Label Helper for Dashboard
+void SetDashboardLabelLine(const string prefix, const string name, const string text, const color textColor, int row)
+{
+    string objName = prefix + name;
+    int yDistance = 20 + (row * 18);
+    
+    if(ObjectFind(0, objName) < 0)
+    {
+        ObjectCreate(0, objName, OBJ_LABEL, 0, 0, 0);
+        ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, 10);
+        ObjectSetInteger(0, objName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+        ObjectSetInteger(0, objName, OBJPROP_FONTSIZE, 10);
+        ObjectSetString(0, objName, OBJPROP_FONT, "Lucida Console");
+    }
+    
+    ObjectSetString(0, objName, OBJPROP_TEXT, text);
+    ObjectSetInteger(0, objName, OBJPROP_COLOR, textColor);
+    ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, yDistance);
+}
 
-   double normalized = MathFloor(volume / lotStep) * lotStep;
-
-   if(normalized < minLot)
-     {
-      DebugPrint(StringFormat("Warning: Calculated lot (%.4f) < Min Lot (%.2f). Forcing Min Lot.", volume, minLot));
-      normalized = minLot;
-     }
-   else if(normalized > maxLot)
-     {
-      DebugPrint(StringFormat("Warning: Calculated lot (%.2f) > Max Lot (%.2f). Capping to Max Lot.", normalized, maxLot));
-      normalized = maxLot;
-     }
-
-   int digits = 2;
-   if(lotStep == 0.001) digits = 3;
-   if(lotStep == 0.1) digits = 1;
-   if(lotStep == 1.0) digits = 0;
-
-   return NormalizeDouble(normalized, digits);
-  }
-
-bool GetIndicatorValue(const int handle,const int shift,double &value,const int bufferIndex = 0)
-  {
-   double buffer[];
-   ArraySetAsSeries(buffer,true);
-   if(CopyBuffer(handle,bufferIndex,shift,1,buffer) != 1)
-      return false;
-
-   value = buffer[0];
-   return true;
-  }
-
-void SetDashboardLabelLine(const string prefix,const string name,const string text,const color textColor,const int row)
-  {
-   string objectName = prefix + name;
-   if(ObjectFind(0,objectName) < 0)
-     {
-      ObjectCreate(0,objectName,OBJ_LABEL,0,0,0);
-      ObjectSetInteger(0,objectName,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-      ObjectSetInteger(0,objectName,OBJPROP_XDISTANCE,10);
-      ObjectSetInteger(0,objectName,OBJPROP_YDISTANCE,20 + row * 18);
-      ObjectSetInteger(0,objectName,OBJPROP_FONTSIZE,10);
-      ObjectSetString(0,objectName,OBJPROP_FONT,"Consolas");
-     }
-   ObjectSetString(0,objectName,OBJPROP_TEXT,text);
-   ObjectSetInteger(0,objectName,OBJPROP_COLOR,textColor);
-  }
-
-void CleanupLogsByPattern(const string pattern,const int minNameLen,const int dateTokenStart)
-  {
-   /*
-   if(InpLogRetentionDays <= 0)
-      return;
-
-   string fileName;
-   long searchHandle = FileFindFirst(pattern, fileName);
-   if(searchHandle != INVALID_HANDLE)
-     {
-      datetime threshold = TimeTradeServer() - (InpLogRetentionDays * 86400);
-      do
+// Log Cleanup Utility
+void CleanupLogsByPattern(const string pattern, int keepDays, int dummy)
+{
+    string fileName;
+    long searchHandle = FileFindFirst(pattern, fileName);
+    if(searchHandle == INVALID_HANDLE) return;
+    
+    datetime now = TimeTradeServer();
+    long secondsToKeep = keepDays * 24 * 3600;
+    
+    do {
+        datetime lastMod = (datetime)FileGetInteger(fileName, FILE_MODIFY_DATE);
+        if(now - lastMod > secondsToKeep)
         {
-         if(StringLen(fileName) < minNameLen)
-            continue;
-
-         string dateToken = StringSubstr(fileName,dateTokenStart,8);
-         string formattedDate = StringFormat("%s.%s.%s",StringSubstr(dateToken,0,4),StringSubstr(dateToken,4,2),StringSubstr(dateToken,6,2));
-         datetime fileDate = StringToTime(formattedDate);
-         if(fileDate > 0 && fileDate < threshold)
-           {
             FileDelete(fileName);
-            DebugPrint(StringFormat("Deleted old log file: %s", fileName));
-           }
         }
-      while(FileFindNext(searchHandle, fileName));
-      FileFindClose(searchHandle);
-     }
-   */
-  }
+    } while(FileFindNext(searchHandle, fileName));
+    
+    FileFindClose(searchHandle);
+}
 
-#endif // GOLDEA_COMMON_CORE_MQH
+// [REMOVED] DrawTradeArrow deleted to avoid conflict with EA-specific logging modules.
+
+#endif
