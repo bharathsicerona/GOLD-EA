@@ -2,6 +2,17 @@
 
 This project contains a collection of Expert Advisors (EAs) for automated trading of Gold (XAUUSD) on the MetaTrader 5 platform. It includes multiple strategies, shared libraries, and a Python script for advanced log analysis.
 
+## Limit Execution Update
+
+-   M1 QuickHands, M1 Scalper, M5 Adaptive, and HLTEM now place **limit orders** instead of entering at market.
+-   Existing entry validation and SL/TP calculations are preserved; only the execution method changed.
+-   Pending orders expire after **2 candles** if unfilled.
+-   Limit entries are now normalized against broker stop-distance rules, and SL is recalculated after any entry-price shift.
+-   Cross-EA safety now blocks new entries if **any** pending order already exists on the same symbol.
+-   Logging flow is now:
+    *   `ORDER` for `LIMIT_PLACED`
+    *   `EXECUTION` only when the limit order is actually filled
+
 ## Project Structure
 
 The project is organized into a clean and modular structure to ensure clarity and maintainability.
@@ -30,7 +41,7 @@ The project is organized into a clean and modular structure to ensure clarity an
 
 ## Expert Advisors
 
-This project includes three distinct Expert Advisors. Each has its own dedicated folder within the `EAs/` directory, containing the main `.mq5` file, any specific `.mqh` include files, and a detailed `README.md`.
+This project includes five active Expert Advisors. Each has its own dedicated folder within the `EAs/` directory, containing the main `.mq5` file, any specific `.mqh` include files, and a detailed `README.md`.
 
 ### 1. M5 Adaptive Multi-Factor EA (Capital Stabilizer)
 
@@ -54,29 +65,48 @@ This project includes three distinct Expert Advisors. Each has its own dedicated
 
 -   **Folder:** `EAs/M1_Scalper/`
 -   **Role:** Capital Booster (higher-frequency scalping on M1).
--   **Strategy:** An aggressive, high-frequency scalping strategy that evaluates three core entry models (EMA Pullback, Breakout, and Liquidity Sweep) on each new bar. It uses a signal interaction engine to process the signals and decide on a final trade action.
-    -   **`M1_EMA_PULLBACK`:** Enters on a price pullback to the EMA20 in a confirmed trend.
-    -   **`M1_BREAKOUT`:** Enters on price breaking recent highs/lows with ATR expansion and strong candle quality.
-    -   **`M1_LIQUIDITY_SWEEP`:** Enters after a liquidity sweep, where price takes out a previous high/low and then reverses. This signal has override priority.
--   **Trade Management Intelligence (Reversal Layer):**
-    -   **`M1_REVERSAL`:** Formerly an entry signal, now converted into a management layer. It monitors RSI extremes and engulfing patterns while a trade is open.
-    -   **Against Trade:** Tightens SL aggressively or triggers an `EARLY_EXIT_REVERSAL` if strong reversal patterns appear.
-    -   **Supports Trade:** Extends TP (`TP_EXTENDED_REVERSAL`) to boost profits in strong trend-reversal continuations.
+-   **Active Strategy:** The current production path is a single-strategy trend continuation model: `M1_TREND_RSI_CONTINUATION`.
+    -   **Trend Structure:** EMA20 vs EMA50 for fast trend direction.
+    -   **Higher-Timeframe Bias:** EMA100 acts as a directional filter.
+    -   **Momentum Confirmation:** RSI must support the trade direction and remain out of exhausted zones.
+    -   **Execution Style:** new-bar only, candle-close driven.
 -   **Key Filters:**
-    -   Session restricted to London & New York.
-    -   Hard filters for minimum ATR and maximum spread.
-    -   Controls for trade frequency, including a 5-candle cooldown and a loss-cluster guard.
+    -   Adaptive ATR filter, trend-strength filter, chop filter, and two-candle weakness filter.
+    -   Hard spread filter and cooldown gating.
+    -   Session-awareness is available through inputs and filter logic.
+    -   Elite upgrade adds auto mode switching (`SAFE` / `NORMAL` / `AGGRESSIVE`), pullback distance checks, explosive-mode validation, and pro spread filtering.
 -   **Risk & Trade Management:**
-    -   Uses the shared `GoldEA_Unified_Risk.mqh` engine: risk is capped at `$3` for `0.01` lot, `$6` for `0.02` lot, and `1%` of balance for larger trades.
-    -   Employs an aggressive R-based trailing stop to lock in profits and let runners continue (`1R -> BE`, `1.5R -> +0.5R`, `2R -> trail by 1R`).
-    -   Includes an in-trade `StrategyFeedbackManager` to dynamically manage open positions based on new signals.
+    -   Uses `GoldEA_Unified_Risk.mqh` through `CalculateTradeRisk()`.
+    -   Shared fixed monetary path currently uses `$4` risk for `0.01` lot, `$8` for `0.02` lot, and `1%` of balance for larger trades.
+    -   M1 also uses the ATR-clamped dynamic stop path when ATR distance is passed into the risk engine.
+    -   Active in-trade management is the simplified `ManageTrendRSIContinuation()` lock-and-trail flow.
+    -   Recent patch fixes R-multiple calculation, broker-safe stop validation, and duplicate SL-update prevention.
 -   **More Info:** See the `EAs/M1_Scalper/README.md` for a detailed explanation of its aggressive profit-taking mechanisms.
 
 ### M1 Adaptive Filter Layer
 
-The M1 Scalper now includes an Adaptive Filter Layer that runs before any strategies are evaluated. This layer analyzes the current market conditions and prevents trades when the environment is unfavorable, which improves win rates and reduces overtrading. The filters include checks for dynamic ATR, trend strength, chop, candle quality, and session-specific conditions. For more details, see the [M1 Filter Layer Documentation](docs/M1_FILTER_LAYER.md).
+The M1 Scalper includes an Adaptive Filter Layer that runs before the single active strategy is evaluated. This layer analyzes volatility, trend strength, chop, candle quality, and session context to reduce low-quality entries. For more details, see the [M1 Filter Layer Documentation](docs/M1_FILTER_LAYER.md).
 
-### 3. Beginner Trend Pullback EA
+### 3. M1 QuickHands EA (Capital Accelerator)
+
+-   **Folder:** `EAs/M1_QuickHands/`
+*   **Role:** Capital Accelerator (pattern-based scalping on M1).
+*   **Strategy:** Liquidity Sweep + Momentum Confirmation (**LSMC**) on bar close. BUY uses `RRG` sweep-low continuation, SELL uses `GGR` sweep-high continuation, with Candle 1 EMA50 bias and mandatory structure break.
+*   **Dashboard:** Shows sweep / rejection / confirmation state, ATR, spread, blocked reason, live profit, current dollar lock level, and SL in USD.
+*   **Active Filters:** High spread, low ATR versus ATR average, no-liquidity-sweep, weak rejection, weak confirmation, weak C1 body, weak context body, EMA bias, and optional micro-trend filtering.
+*   **Key Pipeline Filters:**
+    *   **GGR/RRG Pattern:** Enters on a specific 3-candle sequence (Closed shifts 1, 2, 3).
+    *   **Shallow Pullback Rule:** Rejects trades if the trigger candle's range is >= 60% of the initial impulse.
+    *   **Mandatory Candle Quality:** ALL 3 candles must be "Strong" (Body >= 50% of range).
+    *   **EMA Confirmation:** Enforces trend alignment (Fast > Slow for BUY, Fast < Slow for SELL).
+    *   **Elite fast-trend layer:** adds EMA100 bias, EMA20 slope check, RSI momentum filter, auto mode switch, pullback distance filter, and explosive-mode option.
+*   **Risk & Trade Management:**
+    *   QuickHands now opens with a fixed initial stop loss of **$5** and **no take profit**.
+    *   QuickHands-only aggressive dollar lock now follows `+$1 -> lock $0.5`, and from `+$2` onward locks `(profit - 1)$` dynamically.
+    *   Recent patch keeps stop-level validation and trailing-state persistence isolated to QuickHands.
+-   **More Info:** See the [M1 QuickHands Strategy Documentation](docs/M1_QUICKHANDS_STRATEGY.md) and `EAs/M1_QuickHands/README.md`.
+
+### 4. Beginner Trend Pullback EA
 
 -   **Folder:** `EAs/Beginner/`
 -   **Strategy:** A simple, easy-to-understand trend-following strategy that enters on pullbacks to a moving average.
@@ -153,9 +183,10 @@ The project includes a powerful Python script (`scripts/analyze_ea_logs.py`) to 
 
 ## Logging System
 
-- Structured logging format is implemented for both EAs:
+- Structured logging format is implemented for the active GoldEA families:
   - `[M1_SCALPER][GoldEA][TYPE] ...`
   - `[M5][GoldEA][TYPE] ...`
+  - `[M1_QUICKHANDS][GoldEA][TYPE] ...`
 - Standard log types:
   - `CHECK` for signal evaluation
   - `EXECUTION` for order placement
@@ -164,11 +195,9 @@ The project includes a powerful Python script (`scripts/analyze_ea_logs.py`) to 
   - `MGMT` for active trade intelligence and management (e.g., Reversal-based tightening)
   - `STATS` for periodic internal counter snapshots
 - Trade lifecycle is fully logged with `tradeId`, `score`, `atr`, `spread`, and `reason` fields.
-- Logs are aligned with `scripts/analyze_ea_logs.py` expectations (`M1_SCALPER` / `M5` prefixes and `BUY|SELL check:` + `BUY|SELL executed:` patterns).
-- M1 check log format now dynamically includes the strategy name:
-  - `[M1_SCALPER][GoldEA][CHECK] [M1_BREAKOUT] BUY check: rsi=... ema20=... ema50=... score=... atr=... spread=... decision=... reason=...`
-  - Same structure for `SELL check`.
-- M1 execution/result log formats:
-  - `[M1_SCALPER][GoldEA][EXECUTION] BUY executed: tradeId=... lot=... entry=... sl=... tp=...`
-  - `[M1_SCALPER][GoldEA][RESULT] STOP_LOSS_HIT tradeId=... profit=...`
-  - `[M1_SCALPER][GoldEA][RESULT] TAKE_PROFIT_HIT tradeId=... profit=...`
+- The Python analyzer now supports current and mixed legacy prefixes, but some older logs still contain historical strategy names and auxiliary event tags.
+- Current M1 check format:
+  - `[M1_SCALPER][GoldEA][CHECK] [M1_TREND_RSI_CONTINUATION] BUY check: ... reason=VALID`
+- Current M1 execution/result format:
+  - `[M1_SCALPER][GoldEA][EXECUTION] [M1_TREND_RSI_CONTINUATION] BUY executed: tradeId=... lot=... entry=... sl=... tp=...`
+  - `[M1_SCALPER][GoldEA][RESULT] [M1_TREND_RSI_CONTINUATION] TAKE_PROFIT_HIT tradeId=... profit=...`

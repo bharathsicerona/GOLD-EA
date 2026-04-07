@@ -6,24 +6,6 @@
 #include "../Include/GoldEA_Common_Core.mqh"
 
 //+------------------------------------------------------------------+
-//| R-Multiple Support Calculations                                  |
-//+------------------------------------------------------------------+
-double GetCurrentProfitR(ulong ticket)
-{
-    if(!PositionSelectByTicket(ticket)) return 0.0;
-    
-    double entry = PositionGetDouble(POSITION_PRICE_OPEN);
-    double sl    = PositionGetDouble(POSITION_SL);
-    double cur   = PositionGetDouble(POSITION_PRICE_CURRENT);
-    double profit = PositionGetDouble(POSITION_PROFIT);
-    
-    double riskPrice = MathAbs(entry - sl);
-    if(riskPrice <= 0) return 0.0;
-    
-    return profit / InpRiskUSD; // Using fixed USD risk of 3.0
-}
-
-//+------------------------------------------------------------------+
 //| Aggressive QuickHands Trailing Logic                             |
 //+------------------------------------------------------------------+
 void ManageQuickHandsTrailing(ulong ticket)
@@ -32,36 +14,90 @@ void ManageQuickHandsTrailing(ulong ticket)
     
     double entry = PositionGetDouble(POSITION_PRICE_OPEN);
     double curSL = PositionGetDouble(POSITION_SL);
+    double currentProfit = PositionGetDouble(POSITION_PROFIT);
+    // --- ELITE UPGRADE START ---
+    double initRisk = 0.0;
+    string riskKey = BuildStateKey("qh_initrisk", ticket);
+    if(GlobalVariableCheck(riskKey))
+        initRisk = GlobalVariableGet(riskKey);
+    if(initRisk <= 0.0)
+        initRisk = MathAbs(entry - curSL);
+    if(initRisk <= 0.0) return;
+    // --- ELITE UPGRADE END ---
     ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
     
     // R is the initial risk distance (Entry to SL)
     // If it has already moved to +1R, MathAbs(entry - curSL) still represents R but we shouldn't move it again.
-    double R = MathAbs(entry - curSL);
+    double R = initRisk;
     if(R <= 0) return;
 
-    double profitPoints = (type == POSITION_TYPE_BUY) ? (SymbolInfoDouble(_Symbol, SYMBOL_BID) - entry) : (entry - SymbolInfoDouble(_Symbol, SYMBOL_ASK));
-    
-    // Move SL to 1R lock when price hits 2R
-    if(profitPoints >= 2.0 * R)
+    double currentPrice = (type == POSITION_TYPE_BUY)
+                          ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                          : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    if(volume <= 0.0 || tickSize <= 0.0 || tickValue <= 0.0) return;
+
+    int desiredLevel = 0;
+    double lockUsd = -1.0;
+    string mgmtTag = "";
+    if(currentProfit >= 2.0)
     {
-        double newSL = (type == POSITION_TYPE_BUY) ? (entry + R) : (entry - R);
-        newSL = NormalizeDouble(newSL, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
-        
-        // Ensure we only move SL forward (to +1R profit)
-        bool shouldUpdate = false;
-        if(type == POSITION_TYPE_BUY && newSL > curSL + _Point) shouldUpdate = true;
-        if(type == POSITION_TYPE_SELL && (curSL == 0 || newSL < curSL - _Point)) shouldUpdate = true;
-        
-        if(shouldUpdate)
-        {
-            CTrade trade;
-            if(trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP)))
-            {
-                LogTyped("MGMT", StringFormat("[%s] SL_MOVED_TO_1R tradeId=%I64u R=%.2f newSL=%.2f", 
-                    "M1_QUICKHANDS", ticket, R, newSL));
-            }
-        }
+        desiredLevel = (int)MathFloor(currentProfit * 10.0);
+        lockUsd = currentProfit - 1.0;
+        mgmtTag = "LOCK_DYNAMIC";
     }
+    else if(currentProfit >= 1.0)
+    {
+        desiredLevel = 1;
+        lockUsd = 0.5;
+        mgmtTag = "LOCK_0.5";
+    }
+    if(lockUsd < 0.0)
+        return;
+
+    string levelKey = BuildStateKey("qh_traillevel", ticket);
+    int currentLevel = GlobalVariableCheck(levelKey) ? (int)GlobalVariableGet(levelKey) : 0;
+    if(desiredLevel <= currentLevel)
+        return;
+
+    double tp = PositionGetDouble(POSITION_TP);
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    double minStop = stopsLevel * point;
+    double lockDistance = (lockUsd / (volume * tickValue)) * tickSize;
+    if(lockDistance <= 0.0)
+        return;
+
+    double newSL = (type == POSITION_TYPE_BUY) ? (entry + lockDistance) : (entry - lockDistance);
+    newSL = NormalizeDouble(newSL, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+
+    if(curSL > 0.0 && MathAbs(newSL - curSL) < (point * 2.0))
+       return;
+
+    if(type == POSITION_TYPE_BUY)
+      {
+       if((currentPrice - newSL) < minStop)
+          return;
+       if(curSL > 0.0 && newSL <= curSL)
+          return;
+      }
+    else
+      {
+       if((newSL - currentPrice) < minStop)
+          return;
+       if(curSL > 0.0 && newSL >= curSL)
+          return;
+      }
+
+    CTrade trade;
+    if(trade.PositionModify(ticket, newSL, tp))
+      {
+       GlobalVariableSet(levelKey, desiredLevel);
+       LogTyped("MGMT", StringFormat("[M1_LSMC] %s tradeId=%I64u profit=%.2f lock=%.2f newSL=%.2f",
+           mgmtTag, ticket, currentProfit, lockUsd, newSL));
+      }
 }
 
 #endif // XAUUSD_M1_QUICKHANDS_MANAGEMENT_MQH

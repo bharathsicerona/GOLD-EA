@@ -26,8 +26,9 @@ The system follows a strict sequential flow during every trading cycle (`OnTick`
 
 1.  **Market Awareness (`EvaluateTickAndDashboard`):** Indicators are calculated and the visual dashboard is updated.
 2.  **Strategy Evaluation (`ValidateEntry` / `SelectAndRunStrategy`):**
-    *   Multiple strategies are checked in parallel.
-    *   **CHECK** logs are emitted for each valid signal detected.
+    *   M1 currently evaluates a single active strategy per bar.
+    *   M5 evaluates direction-specific contexts through the market-mode engine.
+    *   **CHECK** logs are emitted for valid or parser-relevant decision states.
 3.  **Decision Interaction (`ProcessStrategySignals` / `PickBestDecision`):**
     *   The system analyzes signal confluence or conflicts.
     *   If no action is taken, a **REJECTION** log is emitted with a standardized reason.
@@ -142,7 +143,7 @@ The `scripts/analyze_ea_logs.py` script is the "final destination" for all log d
 *   **`data.json`**: A structured nesting of every trade lifecycle, used for custom plotting or dashboarding.
 
 ### Linking Strategy
-The parser uses a "lookback" mechanism: when an `EXECUTION` is found, it finds the most recent `CHECK` on the same side to attribute the trade to a specific strategy and market state.
+The parser primarily links by explicit `tradeId`, strategy tags, and structured lifecycle logs. Lookback is only a fallback for older mixed-format logs.
 
 ---
 
@@ -158,13 +159,13 @@ The parser uses a "lookback" mechanism: when an `EXECUTION` is found, it finds t
 # 📊 9. Example Logs
 
 ### CHECK (Signal Evaluation)
-`[M1_SCALPER][GoldEA][CHECK] [M1_EMA_PULLBACK] BUY check: atr=2.50 spread=200 reason=VALID strategy=M1_EMA_PULLBACK`
+`[M1_SCALPER][GoldEA][CHECK] [M1_TREND_RSI_CONTINUATION] BUY check: atr=2.50 spread=200 reason=VALID strategy=M1_TREND_RSI_CONTINUATION`
 
 ### EXECUTION (Order Placed)
 `[M5][GoldEA][EXECUTION] [M5_TREND_PULLBACK] BUY executed: tradeId=42 lot=0.01 entry=2150.25 sl=2140.25 tp=2180.25 strategy=M5_TREND_PULLBACK`
 
 ### RESULT (Outcome)
-` [M1_EMA_PULLBACK] STOP_LOSS_HIT tradeId=1024 profit=-3.00`
+`[M1_SCALPER][GoldEA][RESULT] [M1_TREND_RSI_CONTINUATION] STOP_LOSS_HIT tradeId=1024 profit=-3.00`
 `[M5][GoldEA][RESULT] [M5_TREND_PULLBACK] TAKE_PROFIT_HIT tradeId=42 profit=30.00`
 `[M1_SCALPER][GoldEA][RESULT] EARLY_EXIT_REVERSAL tradeId=1024 profit=5.00 strength=2.50`
 

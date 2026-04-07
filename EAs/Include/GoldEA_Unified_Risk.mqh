@@ -2,8 +2,8 @@
 ================================================================================
 # Gold EA - Unified Risk Engine (v2.0)
 Fixed monetary stop-loss model used by both M1 and M5 EAs:
-- 0.01 lot => $3 risk
-- 0.02 lot => $6 risk
+- 0.01 lot => $4 risk
+- 0.02 lot => $8 risk
 - 0.03 lot and above => 1% of account balance
 ================================================================================
 */
@@ -81,9 +81,9 @@ double CalculateFixedSLDistance(const double lotSize, const double balance)
    double riskUSD = balance * 0.01;
    const double eps = 0.00001;
    if(MathAbs(lotSize - 0.01) <= eps)
-      riskUSD = 3.0;
+      riskUSD = 4.0;
    else if(MathAbs(lotSize - 0.02) <= eps)
-      riskUSD = 6.0;
+      riskUSD = 8.0;
 
    // risk = (distance / tickSize) * tickValue * lot
    // distance = risk * tickSize / (tickValue * lot)
@@ -100,6 +100,44 @@ double CalculateFixedSLDistance(const double lotSize, const double balance)
 }
 
 //+------------------------------------------------------------------+
+//| Computes DYNAMIC SL distance for M1 Scalper ($3-$5 base range)    |
+//+------------------------------------------------------------------+
+double CalculateM1DynamicRisk(const double lotSize, const double atrDistance)
+{
+   if(lotSize <= 0.0 || atrDistance <= 0.0)
+      return 0.0;
+
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickValue <= 0.0 || tickSize <= 0.0)
+      return 0.0;
+
+   // 1. Calculate raw monetary risk based on ATR distance
+   // Risk = (Distance / TickSize) * TickValue * LotSize
+   double rawRiskUSD = (atrDistance / tickSize) * tickValue * lotSize;
+
+   // 2. Define Clamped Range based on Lot Scaling (Base $3-$5 for 0.01 lot)
+   double scaleFactor = lotSize / 0.01;
+   double minRisk = 3.0 * scaleFactor;
+   double maxRisk = 5.0 * scaleFactor;
+
+   // 3. Apply Clamping
+   double finalRiskUSD = MathMax(minRisk, MathMin(maxRisk, rawRiskUSD));
+
+   // 4. Convert back to price distance
+   // Distance = Risk * TickSize / (TickValue * Lot)
+   double slDistance = (finalRiskUSD * tickSize) / (tickValue * lotSize);
+
+   // 5. Final StopsLevel Check
+   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minStopDistance = stopsLevel * _Point;
+   if(minStopDistance > 0.0 && slDistance < minStopDistance)
+      slDistance = minStopDistance;
+
+   return slDistance;
+}
+
+//+------------------------------------------------------------------+
 //| Applies fixed-SL model to current trade parameters.              |
 //| Keeps lot size selection unchanged; only SL is derived from lot. |
 //+------------------------------------------------------------------+
@@ -107,7 +145,8 @@ bool CalculateTradeRisk(
    const ENUM_ORDER_TYPE orderType,
    const double openPrice,
    double &lotSize,
-   double &stopLoss)
+   double &stopLoss,
+   const double atrDistance = -1.0) // If > 0, use M1 Dynamic Risk
 {
    lotSize = NormalizeLot(lotSize);
    if(lotSize <= 0.0)
@@ -117,10 +156,16 @@ bool CalculateTradeRisk(
      }
 
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double slDistance = CalculateFixedSLDistance(lotSize, balance);
+   double slDistance = 0.0;
+   
+   if (atrDistance > 0)
+      slDistance = CalculateM1DynamicRisk(lotSize, atrDistance);
+   else
+      slDistance = CalculateFixedSLDistance(lotSize, balance);
+      
    if(slDistance <= 0.0)
      {
-      Print("RISK ENGINE: Failed to compute fixed SL distance. Trade aborted.");
+      Print("RISK ENGINE: Failed to compute SL distance. Trade aborted.");
       return false;
      }
 
@@ -133,8 +178,8 @@ bool CalculateTradeRisk(
    if(tickValue > 0.0 && tickSize > 0.0)
       finalRisk = (MathAbs(openPrice - stopLoss) / tickSize) * tickValue * lotSize;
 
-   PrintFormat("RISK LOG: Fixed monetary SL applied. Lot=%.2f Balance=%.2f SL=%.2f Risk=$%.2f",
-               lotSize, balance, stopLoss, finalRisk);
+   PrintFormat("RISK LOG: Dynamic monetary SL applied. Lot=%.2f ATR_Dist=%.2f SL=%.2f Risk=$%.2f",
+               lotSize, atrDistance, stopLoss, finalRisk);
    return true;
 }
 

@@ -12,7 +12,17 @@ struct StrategySignal
 {
     ENUM_POSITION_TYPE type;
     string pattern;
+    string mode;
     double atr;
+    double rsi;
+    double rsiPrev;
+    double emaFast;
+    double emaFastPrev;
+    double emaSlow;
+    double emaBias;
+    double trendStrength;
+    double spreadRatio;
+    double distance;
     long spread;
     string reason;
     bool isValid;
@@ -27,177 +37,316 @@ struct StrategySignal
     double c1Body;
     double c2Body;
     double c3Body;
+    bool sweep;
+    bool rejection;
+    bool confirmation;
 };
 
 //+------------------------------------------------------------------+
-//| Evaluates GG-R (BUY) or RR-G (SELL) Trend Patterns               |
+//| Helper: Get Candle Pattern String (OLD -> NEW = c3 c2 c1)        |
+//+------------------------------------------------------------------+
+string GetCandlePattern()
+{
+    int c1 = 1, c2 = 2, c3 = 3;
+
+    double o1 = iOpen(_Symbol, PERIOD_M1, c1);
+    double c1p = iClose(_Symbol, PERIOD_M1, c1);
+
+    double o2 = iOpen(_Symbol, PERIOD_M1, c2);
+    double c2p = iClose(_Symbol, PERIOD_M1, c2);
+
+    double o3 = iOpen(_Symbol, PERIOD_M1, c3);
+    double c3p = iClose(_Symbol, PERIOD_M1, c3);
+
+    string p1 = (c1p > o1) ? "G" : (c1p < o1 ? "R" : "D");
+    string p2 = (c2p > o2) ? "G" : (c2p < o2 ? "R" : "D");
+    string p3 = (c3p > o3) ? "G" : (c3p < o3 ? "R" : "D");
+
+    return p3 + p2 + p1;
+}
+
+void LogQuickHandsCheck(const string side,
+                        const bool sweep,
+                        const bool rejection,
+                        const bool confirmation,
+                        const double atr,
+                        const long spread,
+                        const string reason)
+{
+    LogTyped("CHECK",
+             StringFormat("[M1_LSMC] %s check: sweep=%s rejection=%s confirm=%s atr=%.2f spread=%d reason=%s strategy=M1_LSMC",
+                          side,
+                          (sweep ? "true" : "false"),
+                          (rejection ? "true" : "false"),
+                          (confirmation ? "true" : "false"),
+                          atr,
+                          (int)spread,
+                          reason));
+}
+
+//+------------------------------------------------------------------+
+//| Evaluates LSMC continuation patterns on closed candles           |
 //+------------------------------------------------------------------+
 bool EvaluateQuickHands(int hFast, int hSlow, int hAtr, StrategySignal &sig)
 {
+    // --- QUICKHANDS FINAL PATCH START ---
     sig.isValid = false;
     sig.reason = "NO_PATTERN";
-    sig.atr = 0;
+    sig.mode = "M1_LSMC";
+    sig.atr = 0.0;
+    sig.rsi = 0.0;
+    sig.rsiPrev = 0.0;
+    sig.emaFast = 0.0;
+    sig.emaFastPrev = 0.0;
+    sig.emaSlow = 0.0;
+    sig.emaBias = 0.0;
+    sig.trendStrength = 0.0;
+    sig.spreadRatio = 0.0;
+    sig.distance = 0.0;
     sig.spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+    sig.pattern = GetCandlePattern();
+    sig.structureSL = 0.0;
+    sig.slStruct = 0.0;
+    sig.slATR = 0.0;
+    sig.slFinal = 0.0;
+    sig.c1BodyRatio = 0.0;
+    sig.c2BodyRatio = 0.0;
+    sig.c3BodyRatio = 0.0;
+    sig.c1Body = 0.0;
+    sig.c2Body = 0.0;
+    sig.c3Body = 0.0;
+    sig.sweep = false;
+    sig.rejection = false;
+    sig.confirmation = false;
 
-    // 1. Hard Filter: Spread
+    double atr = 0.0;
+    if(!GetIndicatorValue(hAtr, 1, atr))
+        return false;
+    sig.atr = atr;
+
     if(sig.spread > InpMaxSpreadPoints)
     {
         sig.reason = "HIGH_SPREAD";
+        LogQuickHandsCheck("SETUP", false, false, false, atr, sig.spread, sig.reason);
         return false;
     }
 
-    // 2. Hard Filter: ATR (Dynamic Volatility)
-    double atr;
-    if(!GetIndicatorValue(hAtr, 1, atr)) return false;
-    sig.atr = atr;
-    if(atr < InpMinAtrPoints * _Point)
+    double atrSeries[];
+    ArraySetAsSeries(atrSeries, true);
+    if(CopyBuffer(hAtr, 0, 1, 20, atrSeries) == 20)
     {
-        sig.reason = "LOW_ATR_DYNAMIC";
-        return false;
+        double atrAvg = 0.0;
+        for(int i = 0; i < 20; i++)
+            atrAvg += atrSeries[i];
+        atrAvg /= 20.0;
+
+        if(atr < atrAvg * 0.8)
+        {
+            sig.reason = "LOW_ATR";
+            LogQuickHandsCheck("SETUP", false, false, false, atr, sig.spread, sig.reason);
+            return false;
+        }
     }
 
-    // 3. Trend Check (EMA Fast vs Slow)
-    double fast, slow;
-    if(!GetIndicatorValue(hFast, 1, fast)) return false;
-    if(!GetIndicatorValue(hSlow, 1, slow)) return false;
+    double ema20c1 = 0.0, ema20c2 = 0.0, ema50c1 = 0.0;
+    if(!GetIndicatorValue(hFast, 1, ema20c1)) return false;
+    if(!GetIndicatorValue(hFast, 2, ema20c2)) return false;
+    if(!GetIndicatorValue(hSlow, 1, ema50c1)) return false;
+    sig.emaFast = ema20c1;
+    sig.emaFastPrev = ema20c2;
+    sig.emaSlow = ema50c1;
 
-    bool isTrendUp = (fast > slow);
-    bool isTrendDown = (fast < slow);
-
-    if(!isTrendUp && !isTrendDown)
-    {
-        sig.reason = "WEAK_TREND";
-        return false;
-    }
-
-    // 4. Candle Quality Filter (Body >= 50%)
-    // Candle index: 0=Live(forming), 1=Red(last closed), 2=Green, 3=Green
-    // Shift:         0            1                  2            3
     MqlRates rates[];
     ArraySetAsSeries(rates, true);
-    if(CopyRates(_Symbol, PERIOD_M1, 1, 3, rates) < 3) return false;
+    if(CopyRates(_Symbol, PERIOD_M1, 1, 3, rates) < 3)
+        return false;
 
-    // Calculate Ratios
-    double ratios[3];
-    bool weakCandle = false;
-    for(int i = 0; i < 3; i++)
+    MqlRates c1 = rates[0];
+    MqlRates c2 = rates[1];
+    MqlRates c3 = rates[2];
+
+    double c1_body = MathAbs(c1.close - c1.open);
+    double c1_range = c1.high - c1.low;
+    double c2_body = MathAbs(c2.close - c2.open);
+    double c2_range = c2.high - c2.low;
+    double c3_body = MathAbs(c3.close - c3.open);
+    double c3_range = c3.high - c3.low;
+
+    sig.c1Body = c1_body;
+    sig.c2Body = c2_body;
+    sig.c3Body = c3_body;
+    sig.c1BodyRatio = (c1_range > 0.0) ? (c1_body / c1_range) : 0.0;
+    sig.c2BodyRatio = (c2_range > 0.0) ? (c2_body / c2_range) : 0.0;
+    sig.c3BodyRatio = (c3_range > 0.0) ? (c3_body / c3_range) : 0.0;
+
+    bool c1Bull = (c1.close > c1.open);
+    bool c1Bear = (c1.close < c1.open);
+    bool c2Bull = (c2.close > c2.open);
+    bool c2Bear = (c2.close < c2.open);
+    bool c3Bull = (c3.close > c3.open);
+    bool c3Bear = (c3.close < c3.open);
+
+    bool buyPattern = (c3Bear && c2Bear && c1Bull);
+    bool sellPattern = (c3Bull && c2Bull && c1Bear);
+
+    if(!buyPattern && !sellPattern)
     {
-        double body = MathAbs(rates[i].open - rates[i].close);
-        double range = rates[i].high - rates[i].low;
-        ratios[i] = (range > 0) ? (body / range) : 0;
-        if(ratios[i] < 0.5) weakCandle = true;
-    }
-
-    sig.c1BodyRatio = ratios[0];
-    sig.c2BodyRatio = ratios[1];
-    sig.c3BodyRatio = ratios[2];
-
-    if(weakCandle)
-    {
-        sig.reason = "WEAK_CANDLE_BODY";
-        // We still check if a pattern *would* have existed for logging purposes if needed, 
-        // but the prompt says return false here.
-    }
-
-    // 5. Pattern Recognition (GG-R / RR-G)
-    // Candle types
-    bool c1Green = (rates[0].close > rates[0].open);
-    bool c1Red   = (rates[0].close < rates[0].open);
-    bool c2Green = (rates[1].close > rates[1].open);
-    bool c2Red   = (rates[1].close < rates[1].open);
-    bool c3Green = (rates[2].close > rates[2].open);
-    bool c3Red   = (rates[2].close < rates[2].open);
-
-    // Handle Pattern Side Assignment for Rejection Logging
-    if(c3Green && c2Green && c1Red) sig.type = POSITION_TYPE_BUY;
-    else if(c3Red && c2Red && c1Green) sig.type = POSITION_TYPE_SELL;
-
-    // 6. Overextension Filter
-    sig.c1Body = MathAbs(rates[0].open - rates[0].close);
-    sig.c2Body = MathAbs(rates[1].open - rates[1].close);
-    sig.c3Body = MathAbs(rates[2].open - rates[2].close);
-    double combinedBody = sig.c1Body + sig.c2Body;
-
-    if (combinedBody == 0)
-    {
-        sig.reason = "C3_OVEREXTENDED";
+        sig.reason = "PATTERN_FAIL";
+        LogQuickHandsCheck("SETUP", false, false, false, atr, sig.spread, sig.reason);
         return false;
     }
 
-    sig.c3Ratio = sig.c3Body / combinedBody;
-
-    if (sig.c3Ratio > 0.6)
+    if(buyPattern)
     {
-        sig.reason = "C3_OVEREXTENDED";
-        return false;
-    }
+        sig.type = POSITION_TYPE_BUY;
+        sig.pattern = "RRG";
+        sig.sweep = (c2.low < c3.low);
+        sig.rejection = (c2_range > 0.0) && ((MathMin(c2.open, c2.close) - c2.low) > (0.5 * c2_range));
+        sig.confirmation = c1Bull && (c1_range > 0.0) && (c1_body >= 0.6 * c1_range);
 
-    if(weakCandle) return false;
-
-    // BUY: GG-R (Green, Green, Red) + Trend Up
-    // rates[2]=C3, rates[1]=C2, rates[0]=C1
-    if(isTrendUp && sig.type == POSITION_TYPE_BUY)
-    {
-        // 🔥 NEW EMA CONDITION: If origin C3 was below EMA, confirm C1 is above
-        if(rates[2].close < fast && rates[0].close <= fast)
+        if(c1_range <= 0.0 || sig.c1BodyRatio < 0.5)
         {
-            sig.reason = "EMA_CONF_FAIL";
+            sig.reason = "WEAK_C1_BODY";
+            LogQuickHandsCheck("BUY", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
             return false;
         }
 
-        sig.pattern = "GG-R";
+        if(c2_range <= 0.0 || c3_range <= 0.0 || (sig.c2BodyRatio < 0.4 && sig.c3BodyRatio < 0.4))
+        {
+            sig.reason = "WEAK_CONTEXT_BODY";
+            LogQuickHandsCheck("BUY", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+            return false;
+        }
+
+        if(c1.close <= ema50c1)
+        {
+            sig.reason = "EMA_BIAS_FAIL";
+            LogQuickHandsCheck("BUY", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+            return false;
+        }
+
+        if(!sig.sweep)
+        {
+            sig.reason = "NO_LIQUIDITY_SWEEP";
+            LogQuickHandsCheck("BUY", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+            return false;
+        }
+
+        if(!sig.rejection)
+        {
+            sig.reason = "WEAK_REJECTION";
+            LogQuickHandsCheck("BUY", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+            return false;
+        }
+
+        if(!sig.confirmation)
+        {
+            sig.reason = "WEAK_CONFIRMATION";
+            LogQuickHandsCheck("BUY", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+            return false;
+        }
+
+        if(c1.high <= c2.high)
+        {
+            sig.reason = "NO_STRUCTURE_BREAK";
+            LogQuickHandsCheck("BUY", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+            return false;
+        }
+
+        if(InpUseMicroTrendFilter && c1.low <= c2.low)
+        {
+            sig.reason = "MICRO_TREND_FAIL";
+            LogQuickHandsCheck("BUY", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+            return false;
+        }
+
         sig.isValid = true;
         sig.reason = "VALID";
+        LogQuickHandsCheck("BUY", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+        LogTyped("SIGNAL", "[M1_LSMC] BUY confirmed");
 
         double entry = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-        // Anti-stophunt: Min of Candle 2 and 3 lows
-        sig.structureSL = MathMin(rates[1].low, rates[2].low);
+        sig.structureSL = MathMin(c1.low, c2.low);
         sig.slStruct = entry - sig.structureSL;
-        
-        sig.slATR = atr * 0.8;
-        
-        // Hybrid calculation
-        sig.slFinal = MathMin(sig.slStruct, sig.slATR * 1.5);
-        
-        // Safety Clamps (ENTRY ONLY)
-        sig.slFinal = MathMax(sig.slFinal, 4.0);
-        sig.slFinal = MathMin(sig.slFinal, 6.0);
-        
+        sig.slATR = atr;
+        sig.slFinal = sig.slStruct;
         return true;
     }
 
-    // SELL: RR-G (Red, Red, Green) + Trend Down
-    if(isTrendDown && sig.type == POSITION_TYPE_SELL)
+    sig.type = POSITION_TYPE_SELL;
+    sig.pattern = "GGR";
+    sig.sweep = (c2.high > c3.high);
+    sig.rejection = (c2_range > 0.0) && ((c2.high - MathMax(c2.open, c2.close)) > (0.5 * c2_range));
+    sig.confirmation = c1Bear && (c1_range > 0.0) && (c1_body >= 0.6 * c1_range);
+
+    if(c1_range <= 0.0 || sig.c1BodyRatio < 0.5)
     {
-        // 🔥 NEW EMA CONDITION: If origin C3 was above EMA, confirm C1 is below
-        if(rates[2].close > fast && rates[0].close >= fast)
-        {
-            sig.reason = "EMA_CONF_FAIL";
-            return false;
-        }
-
-        sig.pattern = "RR-G";
-        sig.isValid = true;
-        sig.reason = "VALID";
-
-        double entry = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-        // Anti-stophunt: Max of Candle 2 and 3 highs
-        sig.structureSL = MathMax(rates[1].high, rates[2].high);
-        sig.slStruct = sig.structureSL - entry;
-        
-        sig.slATR = atr * 0.8;
-
-        // Hybrid calculation
-        sig.slFinal = MathMin(sig.slStruct, sig.slATR * 1.5);
-
-        // Safety Clamps (ENTRY ONLY)
-        sig.slFinal = MathMax(sig.slFinal, 4.0);
-        sig.slFinal = MathMin(sig.slFinal, 6.0);
-
-        return true;
+        sig.reason = "WEAK_C1_BODY";
+        LogQuickHandsCheck("SELL", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+        return false;
     }
 
-    return false;
+    if(c2_range <= 0.0 || c3_range <= 0.0 || (sig.c2BodyRatio < 0.4 && sig.c3BodyRatio < 0.4))
+    {
+        sig.reason = "WEAK_CONTEXT_BODY";
+        LogQuickHandsCheck("SELL", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+        return false;
+    }
+
+    if(c1.close >= ema50c1)
+    {
+        sig.reason = "EMA_BIAS_FAIL";
+        LogQuickHandsCheck("SELL", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+        return false;
+    }
+
+    if(!sig.sweep)
+    {
+        sig.reason = "NO_LIQUIDITY_SWEEP";
+        LogQuickHandsCheck("SELL", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+        return false;
+    }
+
+    if(!sig.rejection)
+    {
+        sig.reason = "WEAK_REJECTION";
+        LogQuickHandsCheck("SELL", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+        return false;
+    }
+
+    if(!sig.confirmation)
+    {
+        sig.reason = "WEAK_CONFIRMATION";
+        LogQuickHandsCheck("SELL", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+        return false;
+    }
+
+    if(c1.low >= c2.low)
+    {
+        sig.reason = "NO_STRUCTURE_BREAK";
+        LogQuickHandsCheck("SELL", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+        return false;
+    }
+
+    if(InpUseMicroTrendFilter && c1.high >= c2.high)
+    {
+        sig.reason = "MICRO_TREND_FAIL";
+        LogQuickHandsCheck("SELL", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+        return false;
+    }
+
+    sig.isValid = true;
+    sig.reason = "VALID";
+    LogQuickHandsCheck("SELL", sig.sweep, sig.rejection, sig.confirmation, atr, sig.spread, sig.reason);
+    LogTyped("SIGNAL", "[M1_LSMC] SELL confirmed");
+
+    double entry = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    sig.structureSL = MathMax(c1.high, c2.high);
+    sig.slStruct = sig.structureSL - entry;
+    sig.slATR = atr;
+    sig.slFinal = sig.slStruct;
+    return true;
+    // --- QUICKHANDS FINAL PATCH END ---
 }
 
 #endif // XAUUSD_M1_QUICKHANDS_ENTRY_MQH

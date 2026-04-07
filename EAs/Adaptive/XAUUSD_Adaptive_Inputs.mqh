@@ -50,6 +50,9 @@ input double           InpRsiSellMax             = 48.0;
 
 input double           InpRiskPercent            = 1.0;
 input double           InpMaxAbsoluteRiskPercent = 10.0;
+input bool             InpUseFixedMoneyRisk      = true;  // Use fixed dollar risk instead of ATR for SL
+input double           InpFixedRiskAmount        = 5.0;   // $5.00 fixed risk
+input bool             InpEnableSignalTightening = true;  // Tighten SL if next candles show weakness or reversal
 input bool             InpUseDynamicLotSizing    = false; // Intentionally disabled by default (0.01 fixed phase)
 input bool             InpAllowCounterTrend      = true;
 input double           InpCounterTrendRisk       = 0.50;

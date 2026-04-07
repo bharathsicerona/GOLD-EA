@@ -3,7 +3,7 @@
 M1 QuickHands is a high-frequency, pattern-based Expert Advisor for Gold (XAUUSD) designed to capture quick trend-resumption impulses on the M1 timeframe.
 
 ## 🎯 Strategy Objective
-The strategy exploits a specific candlestick sequence (**GG-R** or **RR-G**) that occurs during a confirmed EMA trend. It assumes that a single opposing candle against the trend is often a brief pause before the trend resumes with momentum.
+The strategy exploits a specific candlestick sequence (**GGR** or **RRG**) that occurs during a confirmed EMA trend. It assumes that a single opposing candle against the trend is often a brief pause before the trend resumes with momentum.
 
 ---
 
@@ -14,30 +14,35 @@ The strategy exploits a specific candlestick sequence (**GG-R** or **RR-G**) tha
 - **EMA Slow:** 50 Periods (Close)
 - **ATR:** 14 Periods
 
-### BUY Signal: GG-R Pattern
+### BUY Signal: GGR Pattern
 1. **Trend Context:** EMA 20 > EMA 50 (Strong Upward Trend).
 2. **Candlestick Sequence (M1):**
-   - `Candle [3]`: **Green** (Bullish)
-   - `Candle [2]`: **Green** (Bullish)
+   - `Candle [3]`: **Green** (Bullish Origin)
+   - `Candle [2]`: **Green** (Bullish Continuation)
    - `Candle [1]`: **Red** (Bearish Pullback)
-3. **Trigger:** Enter **Buy** at the open of `Candle [0]`.
+3. **Execution:** Pattern string must be exactly **"GGR"** (Old -> New).
 
-### SELL Signal: RR-G Pattern
+### SELL Signal: RRG Pattern
 1. **Trend Context:** EMA 20 < EMA 50 (Strong Downward Trend).
 2. **Candlestick Sequence (M1):**
-   - `Candle [3]`: **Red** (Bearish)
-   - `Candle [2]`: **Red** (Bearish)
+   - `Candle [3]`: **Red** (Bearish Origin)
+   - `Candle [2]`: **Red** (Bearish Continuation)
    - `Candle [1]`: **Green** (Bullish Pullback)
-3. **Trigger:** Enter **Sell** at the open of `Candle [0]`.
+3. **Execution:** Pattern string must be exactly **"RRG"** (Old -> New).
 
 ---
 
 ## 🛑 Filters & Risk Engine
 
-### Filters
+### Filters (The Pipeline)
+- **Impulse vs Pullback Filter (CRITICAL):**
+  - **BUY Impulse:** `C2_High - C3_Low`.
+  - **SELL Impulse:** `C3_High - C2_Low`.
+  - **Pullback:** `C1_Range` (High - Low).
+  - **Rule:** Rejects if `Pullback >= 0.6 * Impulse`. This ensures entries only occur on shallow pullbacks.
 - **Dynamic ATR Filter:** Rejects trades if ATR is below `InpMinAtrPoints`.
-- **Candle Quality Filter:** All 3 setup candles (C1, C2, C3) must have a **Body ≥ 50%** of their total High-Low range.
-- **EMA Confirmation Filter:** If the origin candle (**C3**) is on the wrong side of the EMA Fast, then the signal candle (**C1**) must have crossed and closed back on the correct side to confirm momentum.
+- **Candle Quality Filter:** ALL 3 setup candles (C1, C2, C3) must be **Strong** (`Body >= 50%` of range).
+- **EMA Confirmation Filter:** If the origin candle (**C3**) is on the wrong side of the EMA Fast, then the signal candle (**C1**) must have crossed and closed back on the correct side.
 - **Spread Filter:** Blocks execution if the real-time spread exceeds `InpMaxSpreadPoints`.
 
 ### Risk Management
@@ -68,7 +73,7 @@ This ensures a minimum 1:1 RR is bankable once the trade reaches a high-probabil
 M1 QuickHands is fully integrated with the **GoldEA Analytics Suite**:
 
 - **Prefix:** `[M1_QUICKHANDS][GoldEA]`
-- **Extra Metadata:** Logs the specific `pattern` (GG-R/RR-G) in every CHECK and EXECUTION event.
+- **Extra Metadata:** Logs the specific `pattern` (GGR/RRG) in every CHECK and EXECUTION event.
 - **Management Logs:** Emits `[MGMT] TRAIL_UPDATE` logs with `lockedR` fields for performance tracking.
 
 ## 🐍 Python Parser Integration

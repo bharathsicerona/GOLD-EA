@@ -49,20 +49,21 @@ The following list includes all files currently present in the project workspace
 | Beginner docs | `EAs/Beginner/README.md` | Beginner EA high-level guide | Beginner users |
 | Beginner main | `EAs/Beginner/XAUUSD_Beginner_Trend_Pullback_EA.mq5` | Self-contained simple M5 EA | MT5 runtime |
 | Shared include | `EAs/Include/GoldEA_Common_Core.mqh` | Common helpers (**SetDashboardLabelLine**, **CleanupLogsByPattern**) + **Trade Context Engine** (`g_tradeContextMap`) | M1 + M5 modules |
+| Shared include | `EAs/Include/GoldEA_Limit_Execution.mqh` | Shared pending limit-order engine (price calc, broker-safe entry normalization, SL recalc helpers, expiry, fill clear, global pending-order guard) | M1 QuickHands, M1 Scalper, M5 Adaptive, HLTEM |
 
 
 | Shared include | `EAs/Include/GoldEA_Unified_Risk.mqh` | Shared fixed monetary SL engine (`$3/$6/1%`) + stop normalization helpers | M1 + M5 execution |
 | M1 docs | `EAs/M1_Scalper/README.md` | Pointer to consolidated docs | M1 users |
 | M1 main | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` | M1 EA bootstrap + execution orchestration | MT5 runtime |
-| M1 inputs | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh` | High-risk mode, session mode, filters, visualization params | M1 main/modules |
-| M1 indicators | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Indicators.mqh` | Placeholder/empty module | M1 include chain (legacy) |
-| M1 entry | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | Scoring-based EMA/ATR entry validator (`ValidateEntry`) | M1 main |
-| M1 high-risk mgmt | `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` | Profit-lock trailing and dynamic TP extension helpers | M1 main |
+| M1 inputs | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh` | High-risk mode, session mode, filters, EMA100 params | M1 main/modules |
+| M1 indicators | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Indicators.mqh` | Indicator handle initialization | M1 main |
+| M1 entry | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | Single strategy EMA/RSI entry validator (`ValidateEntry`) | M1 main |
+| M1 high-risk mgmt | `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` | Simplified n-1 profit locking system | M1 main |
 | M1 logging | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Logging.mqh` | M1 CSV logging + dashboard | M1 main |
 | M1 QH main | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_EA.mq5` | M1 QuickHands main EA | MT5 runtime |
-| M1 QH inputs | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Inputs.mqh` | QuickHands inputs/params | QH main |
-| M1 QH entry | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Entry.mqh` | Pattern GG-R/RR-G logic | QH main |
-| M1 QH mgmt | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Management.mqh` | Aggressive R-trailing | QH main |
+| M1 QH inputs | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Inputs.mqh` | QuickHands inputs/params incl. optional micro-trend filter and fixed `$5` SL input | QH main |
+| M1 QH entry | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Entry.mqh` | LSMC bar-close entry logic (`RRG` buy / `GGR` sell) with Candle 1 EMA50 bias, sweep/rejection/confirmation checks, spread/ATR filters, and structure-break confirmation | QH main |
+| M1 QH mgmt | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Management.mqh` | QuickHands-only aggressive dollar-lock management (`+$1 -> $0.5`, `+$2+ -> profit-1`) | QH main |
 | M1 QH logging | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Logging.mqh` | Dashboard/LogTyped for QH | QH main |
 | HLTEM main | `EAs/HLTEM/XAUUSD_HLTEM_EA.mq5` | M15->M1 Multitimeframe EA | MT5 runtime |
 | HLTEM inputs | `EAs/HLTEM/XAUUSD_HLTEM_Inputs.mqh` | EA Configuration / Magic Number | HLTEM main |
@@ -90,28 +91,36 @@ The following list includes all files currently present in the project workspace
 - Strategy type: Capital Booster (high-frequency scalping)
 - Entry logic source: `ValidateEntry()` in `XAUUSD_M1_Scalper_Entry.mqh`
 - Indicators used:
-- EMA20 / EMA50
-- ATR
+- EMA20 / EMA50 / EMA100
+- RSI / ATR
 - Entry conditions:
 - Session restricted to London + New York (Asian disabled)
 - Spread within dynamic/floor threshold
-- Pullback continuation multi-strategy model:
-- Entry Triggers (All evaluated, then processed by signal engine):
-  - **M1_EMA_PULLBACK**: (Bar-close) `EMA20 > EMA50` and `mid` pulls back to touch `EMA20`.
-  - **M1_BREAKOUT**: (Tick-level) `mid` exceeds recent high/low with ATR expansion guard.
-  - **M1_LIQUIDITY_SWEEP**: (Bar-close) Price takes a previous high/low and reverses with a strong wick.
-- **Reversal Management Intelligence (Formerly entry trigger)**:
-  - **M1_REVERSAL**: (Intra-trade) RSI extremes (`<30` or `>70`) + engulfing candles trigger SL tightening, TP extension, or EARLY_EXIT.
+- **Fast Trend Model (M1_TREND_RSI_CONTINUATION):**
+- Entry Triggers:
+  - **HTF Bias:** Close > EMA100 (Buy) / Close < EMA100 (Sell).
+  - **Relaxed Alignment:** `EMA20 > EMA50` (Buy) / `EMA20 < EMA50` (Sell).
+  - **Slope:** `EMA20_curr > EMA20_prev` (Buy).
+  - **Price:** Close[1] above EMA20 (Buy).
+  - **RSI Window:** `35 < RSI < 60` (Buy) / `30 < RSI < 60` (Sell).
+  - **Momentum:** `RSI_current > RSI_prev` (Buy).
+  - **Trend Strength:** `abs(EMA20-EMA50)/ATR > 0.1`.
+- Elite extensions:
+  - auto mode switch (`SAFE` / `NORMAL` / `AGGRESSIVE`)
+  - pullback distance filter (`abs(Close[1]-EMA20) <= ATR * limit`)
+  - explosive mode option (`body1 > ATR * 0.5`)
+  - pro spread filter using spread ratio and trend strength
+- No scoring, no signal interaction engine.
 - Entry decision:
-  - `ValidateEntry` returns an array of signals.
-  - `ProcessStrategySignals` processes the signals, applies rules (e.g. liquidity sweep override, conflict avoidance), and determines the final trade.
+- `ValidateEntry` returns a single signal (boolean).
+- Directly executes if valid.
 - In-trade management:
-  - `StrategyFeedbackManager` (now in management header) integrates **reversal intelligence** to proactively manage SL/TP and early exits.
+- `ManageTrendRSIContinuation` applies n-1 profit locking.
 - Runtime safety kept:
-- spread filter
-- cooldown controls (5-candle entry cooldown)
-- loss-cluster guard: after 2 consecutive losses, skip next 2 signal evaluations
-- Signal evaluation frequency: new M1 candle only
+- **WEAK_CANDLE_DYNAMIC (Pro Version):** Dual closed-candle momentum filter (Close[1,2] vs Open[1,2] < 0.2*ATR).
+- spread filter and 3-candle entry cooldown.
+- Signal evaluation frequency: new M1 candle close ONLY.
+- **Real-Time Dashboard:** Tick-sync system state tracking (Trend, Chop, RSI, Filters, Decision, Trade Phase).
 - Exit / management:
 - M1 scalp exit targets:
 - Entry SL/TP from ATR:
@@ -123,25 +132,26 @@ The following list includes all files currently present in the project workspace
   - `>2R`: trail by `1R`
 - Risk model:
 - Uses `GoldEA_Unified_Risk.mqh` via `CalculateTradeRisk()`
-- Rule A: `0.01 lot -> $3`
-- Rule B: `0.02 lot -> $6`
+- Rule A: `0.01 lot -> $4`
+- Rule B: `0.02 lot -> $8` (proportional)
 - Rule C: `>=0.03 lot -> 1% of balance`
 - Known issues (inferred):
-- `XAUUSD_M1_Scalper_Indicators.mqh` is empty (legacy shell)
+- `XAUUSD_M1_Scalper_Indicators.mqh` mainly contains initialization wrappers; most M1 indicator lifecycle still lives in the main EA file.
 - M1 now uses structured `CHECK/EXECUTION/REJECTION/RESULT/STATS` logs with parser-friendly `BUY|SELL check:` lines
 
 ### M1 QuickHands EA (`EAs/M1_QuickHands/XAUUSD_M1_QuickHands_EA.mq5`)
 
 - Timeframe: `PERIOD_M1`
 - Strategy type: Capital Accelerator (pattern-based scalping)
-- Trade Pattern: 
-  - **QuickHands Pattern (GG-R / RR-G):** Enters on new bar after 2 trend candles + 1 pullback candle.
+- Trade Pattern:
+  - **QuickHands LSMC:** BUY = `RRG` (sweep low + bullish confirmation), SELL = `GGR` (sweep high + bearish confirmation).
+  - Mandatory checks: C1 strong body, C2/C3 context body, Candle 1 EMA50 bias, structure break, spread/ATR filters, optional micro-trend filter.
 - Indicators: EMA20 / EMA50 / ATR14
 - Management:
-  - Aggressive R-trailing stop (e.g., lock 0.3R at 1R profit).
-  - Target Fixed: TP = 5.0 * SL (1:5 RR).
-- Risk: $3 on 0.01 lot (GoldEA Unified Risk Engine).
-- Logging: Specialized `pattern` and `lockedR` metadata for analytics.
+  - QuickHands trailing now uses a QuickHands-only aggressive dollar-lock ladder: `+$1 -> lock $0.5`, then from `+$2` onward lock `(profit - 1)$` dynamically.
+  - No take-profit is placed at entry; exit is stop-managed.
+- Risk: Current execution path uses a fixed initial QuickHands stop of `$5`, converted to price distance at execution time.
+- Logging: Structured `CHECK`, `SIGNAL`, `EXECUTION`, `MGMT`, and `RESULT` logs using the `M1_LSMC` strategy tag.
 
 ### M5 Adaptive Multi-Factor EA (`EAs/Adaptive/XAUUSD_Adaptive_MultiFactor_EA.mq5`)
 
@@ -188,7 +198,7 @@ The following list includes all files currently present in the project workspace
   - Fixed 0.01 lot.
   - SL: FVG side + 50 points.
   - TP: 2.5R Fixed Reward Ratio.
-- Logging: [M5][GoldEA] standardized prefix for pipeline parity.
+- Logging: `[HLTEM][GoldEA]`-style HLTEM-specific debug/execution events plus chart overlays.
 
 ### Beginner Trend Pullback EA (`EAs/Beginner/XAUUSD_Beginner_Trend_Pullback_EA.mq5`)
 
@@ -219,24 +229,23 @@ The following list includes all files currently present in the project workspace
 
 - `IsNewBar()` -> `XAUUSD_Adaptive_MultiFactor_EA.mq5`
 - `CalculateIndicators()` -> `XAUUSD_Adaptive_Indicators.mqh`
-- `RunNewYorkTrendPullbackStrategy()` -> `XAUUSD_Adaptive_Entry.mqh`
-- `RunAsianRangeStrategy()` -> `XAUUSD_Adaptive_Entry.mqh`
-- `RunLondonBreakoutStrategy()` -> `XAUUSD_Adaptive_Entry.mqh`
-- `SelectAndRunStrategy()` + `PickBestDecision()` -> session-based strategy selection
-- `ExecuteTrade()` -> order send + state globals + CSV logging
-- `ManageTrade()` -> open-position management stack
+- `DetectMarketMode()` -> `XAUUSD_Adaptive_Entry.mqh`
+- `EvaluateStrategiesForDirection()` -> `XAUUSD_Adaptive_Entry.mqh`
+- `RunSmartReversalFVG()` -> `XAUUSD_Adaptive_Entry.mqh`
+- `SelectAndRunStrategy()` + `PickBestDecision()` -> final direction/strategy decision
+- `ExecuteTrade()` -> order send + state globals + execution logging
+- `ManageTrade()` -> open-position trailing by strategy R-level
 - `EvaluateEntries()` -> bar-close trading logic
-- `EvaluateTickAndDashboard()` -> live preview and optional tick logging
-- `OnTradeTransaction()` -> prints stop/take/breakeven outcomes
+- `EvaluateTickAndDashboard()` -> live preview and dashboard state
+- `OnTradeTransaction()` -> result logging and lifecycle cleanup
 
 ### M1 Scalper EA
 
-- `AdaptiveFilterCheck()` -> `XAUUSD_M1_Scalper_Entry.mqh`
-- `ValidateEntry()` -> scoring-based EMA/ATR validator with directional score comparison (`XAUUSD_M1_Scalper_Entry.mqh`)
-- `ExecuteHighRiskTrade()` -> unified fixed-SL risk engine call, position open
-- `ManageTrailingStop()` / `UpdateDynamicTP()` / `ExtendTakeProfit()` -> aggressive management
-- `OnTick()` -> Adaptive Filter Layer -> position management + cooldown + frequency cap + buy/sell validation
-- `OnTradeTransaction()` (main) -> remove risk-map state, cooldown timing
+- `UpdateM1ScalperDashboard()` -> real-time tick-sync dashboard for M1 system state monitoring
+- `ValidateEntry(signal)` -> EMA20/50 Fast Trend + EMA100 HTF Bias + Pro Candle Filter validator
+- `ExecuteTrade(direction)` -> unified fixed-SL risk engine call, position open
+- `ManageTrendRSIContinuation(ticket, profit)` -> simplified n-1 profit locking in management module
+- `OnTick()` -> dashboard update -> position management -> cooldown -> new-candle validation
 
 ### Shared Includes
 
@@ -367,16 +376,16 @@ The following list includes all files currently present in the project workspace
 ### M1 Scalper (`EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5`)
 
 - `OnTick()` drives runtime loop: dashboard update, open-position management, cooldown/frequency gates, then entry checks.
-- Entry validation path: `AdaptiveFilterCheck()` -> `ValidateEntry(POSITION_TYPE_BUY/SELL)` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh`.
-- Trade execution path: `ExecuteHighRiskTrade()` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` (calls `CalculateTradeRisk()` from `EAs/Include/GoldEA_Unified_Risk.mqh`).
-- Trade management path: `ManageTrailingStop()`, `UpdateDynamicTP()`, `ExtendTakeProfit()` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` and EA main.
+- Entry validation path: `AdaptiveFilterCheck()` -> `ValidateEntry(signal)` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh`.
+- Trade execution path: `ExecuteTrade()` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` now converts the validated setup into a broker-safe shared limit order via `EAs/Include/GoldEA_Limit_Execution.mqh`.
+- Trade management path: `ManageTrendRSIContinuation()` in `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh`.
 - Trade lifecycle callback: `OnTradeTransaction()` in EA main updates cooldown state and risk-map cleanup.
 
 ### M1 QuickHands (`EAs/M1_QuickHands/XAUUSD_M1_QuickHands_EA.mq5`)
 
-- `OnTick()` drives loop: manage active position via `ManageQuickHandsTrailing()`, check entry signals via `EvaluateQuickHands()`.
-- Entry path: `EvaluateQuickHands()` in `XAUUSD_M1_QuickHands_Entry.mqh`.
-- Execution path: `ExecuteQuickHandsTrade()` in main EA calls `CalculateTradeRisk()`.
+- `OnTick()` drives loop: manage active position via `ManageQuickHandsTrailing()`, check entry signals via `EvaluateQuickHands()`, then refresh the structure dashboard.
+- Entry path: `EvaluateQuickHands()` in `XAUUSD_M1_QuickHands_Entry.mqh` using the LSMC bar-close validator and exact rejection reasons.
+- Execution path: `ExecuteQuickHandsTrade()` in main EA uses the fixed `$5` stop model and broker-safe shared limit-order placement.
 - Management path: `ManageQuickHandsTrailing()` in `XAUUSD_M1_QuickHands_Management.mqh`.
 - Lifecycle: `OnTradeTransaction()` updates active ticket state.
 
@@ -385,7 +394,7 @@ The following list includes all files currently present in the project workspace
 - `OnTick()` drives loop: `EvaluateTickAndDashboard()`, `IsNewBar()`, `ManageOpenTrades(newBar)`, `EvaluateEntries()`.
 - Entry evaluation path: `EvaluateEntries()` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`.
 - Strategy selection path: `SelectAndRunStrategy()` in `EAs/Adaptive/XAUUSD_Adaptive_Entry.mqh` (session-based strategy selection).
-- Trade execution path: `ExecuteTrade(const DecisionContext&)` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`.
+- Trade execution path: `ExecuteTrade(const DecisionContext&)` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh` now places broker-safe shared limit orders and finalizes execution state on fill.
 - Trade management path: `ManageTrade(ticket, isNewBar)` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`.
 - Trade lifecycle callback: `OnTradeTransaction()` in `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`.
 
@@ -418,17 +427,21 @@ The following list includes all files currently present in the project workspace
 | M1 trend-strength + London/NY-only filter tuning | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh`, `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 5-candle entry cooldown tuning | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh` |
 | M1 momentum + ATR quality filters | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh` |
+| M1 elite fast-trend mode switch / pullback / explosive filter | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5`, `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh` |
 | M1 loss-cluster skip logic (2 losses -> skip 2 signals) | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh` |
 | M1 advanced dynamic trailing (level-based + runner mode) | `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
+| M1 QuickHands elite fast-trend overlay and R-lock upgrade | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Entry.mqh` | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_EA.mq5`, `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Management.mqh`, `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Inputs.mqh` |
+| M1 QuickHands trailing patch (stored init risk + stop validation) | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_Management.mqh` | `EAs/M1_QuickHands/XAUUSD_M1_QuickHands_EA.mq5` |
 | M1 trade throttling / cooldown / frequency cap | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Inputs.mqh` |
-| M1 trailing stop / dynamic TP / runner logic | `EAfs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
+| M1 trailing stop / lock-profit logic | `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
+| M1 trailing patch (explicit move/R math + duplicate-update guard) | `EAs/M1_Scalper/XAUUSD_M1_Scalper_HighRisk_Management.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_Entry.mqh`, `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 lot sizing and risk normalization | `EAs/Include/GoldEA_Unified_Risk.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M1 lot cap logic (<= $200 -> 0.01 lot) | `EAs/Include/GoldEA_Unified_Risk.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5` |
 | M5 min lot enforcement | `EAs/Adaptive/XAUUSD_Adaptive_Risk.mqh` | `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh` |
-| Cross-EA fixed monetary SL model (`$3/$6/1%`) | `EAs/Include/GoldEA_Unified_Risk.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5`, `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`, `EAs/Adaptive/XAUUSD_Adaptive_Risk.mqh` |
+| Cross-EA fixed monetary SL helpers (`$4/$8/1%` fixed path) | `EAs/Include/GoldEA_Unified_Risk.mqh` | `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5`, `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`, `EAs/Adaptive/XAUUSD_Adaptive_Risk.mqh` |
 | M5 Capital Stabilizer trend-pullback logic (EMA20/EMA50 + pullback candle) | `EAs/Adaptive/XAUUSD_Adaptive_Entry.mqh` | `EAs/Adaptive/XAUUSD_Adaptive_Indicators.mqh`, `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh` |
 | M5 Asian-session-only stabilizer filter + higher score threshold | `EAs/Adaptive/XAUUSD_Adaptive_Entry.mqh` | `EAs/Adaptive/XAUUSD_Adaptive_Inputs.mqh` |
-| M5 structured risk/TP for 0.01 lot (`$10` SL, `3R` TP) | `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh` | `EAs/Adaptive/XAUUSD_Adaptive_Risk.mqh`, `EAs/Include/GoldEA_Unified_Risk.mqh` |
+| M5 strategy-specific ATR risk/TP execution | `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh` | `EAs/Adaptive/XAUUSD_Adaptive_Risk.mqh`, `EAs/Adaptive/XAUUSD_Adaptive_Entry.mqh` |
 | M5 R-level trailing locks (`1R/1.5R/2R/2.5R`) | `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh` | `EAs/Adaptive/XAUUSD_Adaptive_Logging.mqh` |
 | M5 execution filters / order placement | `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh` | `EAs/Adaptive/XAUUSD_Adaptive_Risk.mqh`, `EAs/Adaptive/XAUUSD_Adaptive_Inputs.mqh` |
 | M5 trade management and exit logging | `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh` | `EAs/Adaptive/XAUUSD_Adaptive_Logging.mqh` |
@@ -444,17 +457,18 @@ The following list includes all files currently present in the project workspace
 - What changed: M1 log wrapper standardized to parser-compatible prefix.
 - Impact: M1 event ingestion in Python analysis is materially improved.
 
-- M1 strategy name logging mismatch is resolved.
-- What changed: M1 `CHECK` logs no longer hardcode `[M1_PA]`; they now dynamically insert the actual strategy name (e.g., `[M1_BREAKOUT]`).
-- Impact: The Python analyzer can now correctly attribute M1 signals to their specific strategies, fixing a major analytics blind spot.
+- Python analyzer had a runtime summary bug.
+- What broke: `scripts/analyze_ea_logs.py` referenced `total_trades` before assignment inside `summarize()`.
+- Impact: analysis aborted even when valid GoldEA events were present.
+- Fix applied: `total_trades` now resolves from executed-event count, and SL-lock metrics also read legacy `LOCK_PROFIT` style logs.
 
 - M1 signal formatting mismatch was resolved via structured `CHECK` logs.
 - What changed: `BUY|SELL check:` lines now include `score`, `atr`, `spread`, `reason`.
 - Impact: improved parser coverage and more reliable rejection analytics.
 
-- `EAs/M1_Scalper/XAUUSD_M1_Scalper_Indicators.mqh` is effectively legacy/empty.
-- What breaks: developers may edit this file expecting indicator behavior changes.
-- Impact: false fixes, wasted debugging cycles.
+- M1 documentation drift is currently the biggest maintainability risk.
+- What breaks: root docs still referenced older multi-strategy M1 and historical risk values.
+- Impact: changes may be made in the wrong module unless `PROJECT_INDEX.md` is checked first.
 
 - M5 now uses active structured trailing by R-level.
 - What changed: `ManageTrade()` applies SL-forward locks at `1R/1.5R/2R/2.5R`.
@@ -467,6 +481,16 @@ The following list includes all files currently present in the project workspace
 - Python parser still uses regex-first parsing (`EA_PREFIX_RE`, `CHECK_RE`, `EXEC_RE`, `RESULT_RE`) but now has legacy fallbacks.
 - What can still break: severely malformed lines with no side/context metadata.
 - Impact: reduced (not eliminated) chance of partial datasets on inconsistent logs.
+
+- M1 bias checks previously mixed live and closed candle references.
+- What broke: EMA100 bias and dashboard readiness could shift intrabar even though entries are bar-close driven.
+- Impact: inconsistent review/debugging versus actual closed-bar signal state.
+- Fix applied: bias/dashboard checks now use the latest closed candle consistently.
+
+- M1 dashboard patch had a compile breakpoint after the elite upgrade.
+- What broke: `UpdateM1ScalperDashboard()` tried to use TP in scope before actually reading `POSITION_TP` into a local variable.
+- Impact: M1 EA failed compilation before runtime.
+- Fix applied: dashboard R-display now derives from a locally fetched `tp = PositionGetDouble(POSITION_TP)`.
 
 - MQL5 compile sensitivity for uppercase conversion in helper functions.
 - What breaks: using `string u = StringToUpper(rawReason);` causes compile error (`constant variable cannot be passed as reference`).

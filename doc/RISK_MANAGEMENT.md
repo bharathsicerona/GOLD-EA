@@ -1,65 +1,98 @@
-# Risk Management System Documentation (v1.0)
+# Risk Management System Documentation
 
 ## 1. Overview
 
-This document outlines the unified risk management engine implemented across all Gold-trading Expert Advisors (EAs), including the M1 Scalper and M5 Conservative strategies. The system is designed to enforce strict capital preservation rules, enhance scalability, and ensure consistent risk behavior without interfering with the core entry logic of the EAs.
+This project currently uses two practical risk paths:
 
-The risk engine automatically adjusts trade parameters (Lot Size and Stop Loss) *before* an order is sent to the broker, based on a set of two primary rules.
+- A shared fixed-monetary stop framework in `EAs/Include/GoldEA_Unified_Risk.mqh`
+- EA-specific execution overlays that may pass ATR-derived distance into that shared engine
 
----
-
-## 2. Core Risk Models
-
-The system operates on a dual-model basis, automatically selecting the rule based on the trade's lot size.
-
-### Rule A: Fixed $10 Risk Cap (for Minimum Lot Trades)
-
-This rule is designed to protect small accounts and control the absolute downside of the smallest possible trades.
-
-*   **Applies When:** The trade's lot size is the broker's minimum (typically `0.01`).
-*   **Logic:**
-    1.  The system calculates the monetary risk of the trade based on its proposed Stop Loss distance (`Risk = SL distance in price × Tick Value × Lot Size`).
-    2.  If the calculated `Risk` is **greater than $10.00**, the system will **reduce the Stop Loss distance** until the risk is exactly $10.00.
-    3.  The trade is then executed with the original `0.01` lot but with the new, tighter Stop Loss.
-    4.  **Safety Check:** If the adjusted Stop Loss is closer than the broker's minimum required distance (`Stops Level`), the trade is aborted to prevent an invalid order error.
-*   **Log Message:** `RISK LOG: Rule 'Fixed $10 cap' applied. SL adjusted from [X] to [Y]. Lot: 0.01, Risk: $10.00`
-
-### Rule B: Dynamic 1% Risk (for All Other Trades)
-
-This rule ensures that as the account grows or shrinks, the risk per trade remains a consistent percentage of equity, promoting scalable and sustainable growth.
-
-*   **Applies When:** The trade's lot size is greater than the broker's minimum (e.g., `0.02` or higher, or when auto-calculation is used).
-*   **Logic:**
-    1.  The system **ignores the EA's incoming lot size**.
-    2.  It calculates the maximum acceptable risk in dollars, which is **1% of the current account balance**. (e.g., `$10` on a `$1000` account).
-    3.  Based on the proposed Stop Loss distance, it calculates the **lot size** that corresponds to this dollar risk.
-        *   `Lot Size = (Account Balance × 1%) / (SL distance in price × Tick Value)`
-    4.  The calculated lot size is normalized to meet the broker's volume step requirements (e.g., rounded down to the nearest 0.01).
-    5.  The trade is executed with this newly calculated lot size and the original Stop Loss.
-*   **Log Message:** `RISK LOG: Rule '1% dynamic risk' applied. Account Balance: $X, Risk Target: $Y. Calculated Lot: Z, ...`
+The important point is that the active codebase does **not** use one single universal behavior for every EA. Documentation and testing should always confirm which execution path is active in the EA being reviewed.
 
 ---
 
-## 3. Stop Loss Normalization
+## 2. Shared Risk Engine (`GoldEA_Unified_Risk.mqh`)
 
-To prevent trade execution errors, all Stop Loss values are automatically normalized before being used. This involves two checks:
-1.  **Tick Size Alignment:** The SL price is rounded to the nearest valid price tick.
-2.  **Minimum Distance:** The system ensures the SL is at least the minimum required distance (`Stops Level`) away from the entry price, as defined by the broker.
+### Fixed Monetary Model
+
+When the caller uses the fixed monetary path, the shared engine applies:
+
+- `0.01 lot -> $4 risk`
+- `0.02 lot -> $8 risk`
+- `0.03 lot and above -> 1% of account balance`
+
+The module converts monetary risk into price distance using:
+
+- `SYMBOL_TRADE_TICK_VALUE`
+- `SYMBOL_TRADE_TICK_SIZE`
+- broker stop-level constraints
+
+### Helper Functions
+
+- `NormalizeLot()` normalizes volume to broker lot steps
+- `AdjustLotForM1()` forces `0.01` for small-balance M1 safety mode when used
+- `NormalizeStop()` aligns SL to tick size and broker stop distance
+- `CalculateFixedSLDistance()` converts dollar risk into price distance
+- `CalculateTradeRisk()` is the main integration function used by EA execution modules
 
 ---
 
-## 4. Example Scenarios
+## 3. M1-Specific Dynamic Overlay
 
-### Scenario 1: Small Account, 0.01 Lot Trade
-*   **Account Balance:** $100
-*   **EA wants to open:** 0.01 lot BUY with a 2000-point SL.
-*   **Risk Calculation:** The 2000-point SL would risk $20. This is > $10.
-*   **Action:** The risk engine reduces the SL to 1000 points (to cap risk at $10).
-*   **Result:** Trade is opened with **0.01 lots** and a **1000-point SL**.
+The shared risk module also contains `CalculateM1DynamicRisk()`.
 
-### Scenario 2: Larger Account, Dynamic Lot
-*   **Account Balance:** $5,000
-*   **EA wants to open:** 0.10 lot BUY with a 1500-point SL.
-*   **Risk Calculation:** The system ignores the 0.10 lot. It calculates the risk target as 1% of $5,000 = **$50**.
-*   **Action:** It calculates the lot size needed to risk $50 with a 1500-point SL. `Lot = $50 / (1500 points of risk) = 0.33 lots`.
-*   **Result:** Trade is opened with **0.33 lots** and the original **1500-point SL**.
+When M1 passes an ATR distance into `CalculateTradeRisk()`:
+
+- ATR distance is first converted into raw dollar risk
+- Risk is then clamped into a practical monetary band
+- Current implementation uses a base clamp of:
+  - roughly `$3-$5` for `0.01`
+  - scaled proportionally for larger lots
+
+This means the M1 Scalper can behave differently from the plain fixed-dollar path even though both flows pass through the same shared header.
+
+---
+
+## 4. Current Effective Behavior by EA
+
+### M1 Scalper
+
+- Main execution file: `EAs/M1_Scalper/XAUUSD_M1_Scalper_EA.mq5`
+- Uses `CalculateTradeRisk(...)` with an ATR distance argument
+- Effective stop comes from the M1 dynamic overlay inside the shared risk engine
+- Lot is currently fixed at `0.01` in the active execution path
+
+### M5 Adaptive
+
+- Main execution file: `EAs/Adaptive/XAUUSD_Adaptive_Management.mqh`
+- Current active path builds price-distance SL directly from strategy ATR logic
+- The shared risk header is included for helpers and compatibility, but M5 execution is primarily strategy-distance driven in the current code
+
+### M1 QuickHands
+
+- Current execution path prepares SL directly from entry-module structure/ATR logic
+- It does not actively call `CalculateTradeRisk()` in the current version
+
+---
+
+## 5. Safety Controls
+
+Across the project, the active safeguards include:
+
+- stop normalization to broker tick grid
+- broker minimum stop distance enforcement
+- free-margin validation before order placement
+- spread filters in entry logic
+- cooldown controls to reduce clustering
+
+---
+
+## 6. Review Notes
+
+When auditing future changes, verify all three layers:
+
+- shared monetary helpers in `GoldEA_Unified_Risk.mqh`
+- EA execution module that calls or bypasses the shared engine
+- documentation in `README.md` and `PROJECT_INDEX.md`
+
+This is important because historical versions of the project used older `$3/$6`, `$10`, and strategy-specific risk models that may still appear in legacy notes or older backtest logs.

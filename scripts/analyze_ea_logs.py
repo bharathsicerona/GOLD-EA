@@ -74,6 +74,14 @@ EXEC_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+REJECTION_RE = re.compile(
+    r"""
+    (?P<side>BUY|SELL|BOTH)\s+
+    (?:rejected|skip(?:ped)?):
+    (?P<body>.*)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 RESULT_RE = re.compile(
     r"""
@@ -408,6 +416,7 @@ def parse_log_file(path: Path) -> list[Event]:
             event = (
                 parse_check_line(content, path, ea_type, timestamp)
                 or parse_execution_line(content, path, ea_type, timestamp)
+                or parse_rejection_line(content, path, ea_type, timestamp)
                 or parse_result_line(content, path, ea_type, timestamp)
                 or parse_mgmt_line(content, path, ea_type, timestamp)
                 or parse_stats_line(content, path, ea_type, timestamp)
@@ -582,6 +591,40 @@ def parse_execution_line(line: str, source_file: Path, ea_type: str, timestamp: 
         sl_source=kv.get("slsource", ""),
     )
 
+
+
+def parse_rejection_line(line: str, source_file: Path, ea_type: str, timestamp: str) -> Event | None:
+    """Parses explicit REJECTION log lines into skipped signal events."""
+    match = REJECTION_RE.search(line)
+    if not match:
+        return None
+
+    body = match.group("body")
+    kv = parse_kv_pairs(body)
+    side = match.group("side").upper()
+    symbol = extract_symbol(line) or extract_symbol(source_file.name)
+    reason = extract_reason_from_text(body, default=kv.get("reason", "UNKNOWN"))
+    strategy = kv.get("strategy", "")
+
+    return build_event(
+        ea_type=ea_type,
+        timestamp=timestamp,
+        symbol=symbol,
+        source_file=source_file,
+        action="SIGNAL_CHECK",
+        trade_type="" if side == "BOTH" else side,
+        strategy=strategy,
+        score=parse_float(kv.get("score")),
+        atr=parse_float(kv.get("atr")),
+        price=parse_float(kv.get("price")),
+        sl=parse_float(kv.get("sl")),
+        tp=parse_float(kv.get("tp")),
+        reason=reason,
+        result="SKIPPED",
+        pattern=kv.get("pattern", ""),
+        bar_time=kv.get("bartime") or kv.get("bar_time"),
+        raw=line,
+    )
 
 
 def parse_result_line(line: str, source_file: Path, ea_type: str, timestamp: str) -> Event | None:
@@ -1016,6 +1059,7 @@ def summarize(events: list[Event]) -> dict[str, object]:
     total_signals = len(signal_events)
     total_executed = len(executed_events)
     total_skipped = len(skipped_events)
+    total_trades = total_executed
     
     pending_placed = len([e for e in events if e.action == "PENDING_PLACED"])
     pending_expired = len([e for e in events if e.action == "PENDING_EXPIRED"])
@@ -1074,7 +1118,15 @@ def summarize(events: list[Event]) -> dict[str, object]:
     min_r = min(r_values) if r_values else None
     
     # QuickHands R-Management Metrics
-    sl_move_events = len([e for e in events if e.action == "SL_MOVED_TO_1R"])
+    sl_move_events = len(
+        [
+            e
+            for e in events
+            if e.action == "SL_MOVED_TO_1R"
+            or "SL_MOVED_TO_1R" in e.raw.upper()
+            or "LOCK_PROFIT" in e.raw.upper()
+        ]
+    )
     sl_to_1r_rate = sl_move_events / total_trades if total_trades > 0 else 0.0
 
     # Old metrics (empty for new version)

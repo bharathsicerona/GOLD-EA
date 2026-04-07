@@ -33,6 +33,7 @@ input double           InpRewardRiskRatio        = 3.0;     // Initial Target Re
 #property group "--- Indicator Settings ---"
 input int              InpFastEmaPeriod          = 20;      // Fast EMA (Momentum)
 input int              InpSlowEmaPeriod          = 50;      // Slow EMA (Trend)
+input int              InpTrendEmaPeriod         = 100;     // Long-term EMA (Trend)
 input int              InpRsiPeriod              = 14;      // RSI Period
 input int              InpAtrPeriod              = 14;      // ATR Period
 
@@ -48,6 +49,14 @@ input double           InpMinAtrValue            = 2.0;     // Min ATR value fil
 input double           InpMinEmaGapPoints        = 35.0;    // Min EMA20-EMA50 gap (trend strength filter)
 input double           InpPullbackAtrFactor      = 0.50;    // Max distance from EMA20 for pullback
 input double           InpSpikeCandleAtrFactor   = 3.0;     // ATR factor to detect and avoid spike candles
+// --- ELITE UPGRADE START ---
+input bool             InpUseExplosiveMode       = false;   // Require explosive momentum candle
+input double           InpPullbackAtrLimit       = 0.30;    // Max distance from EMA20 in ATR units
+input double           InpNormalTrendThreshold   = 0.10;    // Normal mode trend threshold
+input double           InpAggressiveTrendThreshold = 0.20;  // Aggressive mode trend threshold
+input double           InpSpreadRatioLimit       = 0.25;    // Spread/ATR ratio soft limit
+input double           InpSpreadTrendFloor       = 0.15;    // Trend strength floor for high-spread allowance
+// --- ELITE UPGRADE END ---
 
 // --- Trade Execution & Management ---
 #property group "--- Trade Execution & Management ---"

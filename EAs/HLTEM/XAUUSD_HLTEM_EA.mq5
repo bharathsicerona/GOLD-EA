@@ -37,6 +37,8 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+    ManagePendingExpiry(Bars(_Symbol, PERIOD_M1));
+
     // 1. Process New Bar only for heavy checks
     datetime timeM1 = iTime(_Symbol, PERIOD_M1, 0);
     if(timeM1 == g_lastM1Bar) return;
@@ -75,4 +77,31 @@ void OnTick()
         // until a new HTF setup occurs. 
         g_htf.valid = false;
     }
+}
+
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                        const MqlTradeRequest& request,
+                        const MqlTradeResult& result)
+{
+    if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal <= 0)
+        return;
+
+    if(!HistoryDealSelect(trans.deal))
+        return;
+
+    ENUM_DEAL_ENTRY entryType = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+    if(entryType != DEAL_ENTRY_IN)
+        return;
+
+    ulong orderId = (ulong)HistoryDealGetInteger(trans.deal, DEAL_ORDER);
+    double dealPrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+    string side = (HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+    PendingOrderInfo fillInfo = g_pendingOrder;
+    HandleOrderFilled(orderId);
+
+    TradeContext *tCtx = new TradeContext("HLTEM", side, "M5");
+    g_tradeContextMap.Add(fillInfo.logicalTradeId, tCtx);
+
+    LogTyped("EXECUTION", StringFormat("[HLTEM] TRADE_FILLED tradeId=%I64u side=%s entry=%.2f sl=%.2f tp=%.2f",
+             fillInfo.logicalTradeId, side, dealPrice, fillInfo.sl, fillInfo.tp));
 }

@@ -15,14 +15,32 @@
 #include "XAUUSD_M1_QuickHands_Management.mqh"
 #include "../Include/GoldEA_Common_Core.mqh"
 #include "../Include/GoldEA_Unified_Risk.mqh"
+#include "../Include/GoldEA_Limit_Execution.mqh"
 
 //+------------------------------------------------------------------+
 //| --- Global Variables ---                                         |
 //+------------------------------------------------------------------+
 int      g_hFast, g_hSlow, g_hAtr;
+// --- ELITE UPGRADE START ---
+int      g_hBias, g_hRsi;
+// --- ELITE UPGRADE END ---
 CTrade   g_trade;
 datetime g_lastBarCheck = 0;
+datetime g_lastTradeBar = 0;
 ulong    g_activeTicket = 0;
+
+double CalculateSLDistanceFromUSD(const double riskUsd, const double lotSize)
+{
+    if(riskUsd <= 0.0 || lotSize <= 0.0)
+        return 0.0;
+
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    if(tickSize <= 0.0 || tickValue <= 0.0)
+        return 0.0;
+
+    return (riskUsd * tickSize) / (tickValue * lotSize);
+}
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -31,9 +49,13 @@ int OnInit()
 {
     g_hFast = iMA(_Symbol, PERIOD_M1, InpEmaFastPeriod, 0, MODE_EMA, PRICE_CLOSE);
     g_hSlow = iMA(_Symbol, PERIOD_M1, InpEmaSlowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    // --- ELITE UPGRADE START ---
+    g_hBias = iMA(_Symbol, PERIOD_M1, InpEmaBiasPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    g_hRsi  = iRSI(_Symbol, PERIOD_M1, InpRsiPeriod, PRICE_CLOSE);
+    // --- ELITE UPGRADE END ---
     g_hAtr  = iATR(_Symbol, PERIOD_M1, InpAtrPeriod);
 
-    if(g_hFast == INVALID_HANDLE || g_hSlow == INVALID_HANDLE || g_hAtr == INVALID_HANDLE)
+    if(g_hFast == INVALID_HANDLE || g_hSlow == INVALID_HANDLE || g_hBias == INVALID_HANDLE || g_hRsi == INVALID_HANDLE || g_hAtr == INVALID_HANDLE)
     {
         Print("FAILED: Indicator Initialization");
         return INIT_FAILED;
@@ -50,7 +72,28 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+    // --- ELITE UPGRADE START ---
+    if(g_hFast != INVALID_HANDLE) IndicatorRelease(g_hFast);
+    if(g_hSlow != INVALID_HANDLE) IndicatorRelease(g_hSlow);
+    if(g_hBias != INVALID_HANDLE) IndicatorRelease(g_hBias);
+    if(g_hRsi  != INVALID_HANDLE) IndicatorRelease(g_hRsi);
+    if(g_hAtr  != INVALID_HANDLE) IndicatorRelease(g_hAtr);
+    // --- ELITE UPGRADE END ---
     CleanupDashboard();
+}
+
+//+------------------------------------------------------------------+
+//| Helper: Detect New Bar                                           |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+    datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
+    if(currentBarTime != g_lastBarCheck)
+    {
+        g_lastBarCheck = currentBarTime;
+        return true;
+    }
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -58,53 +101,46 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-    // 1. Manage Active Position (Trailing)
+    int currentBarCount = Bars(_Symbol, PERIOD_M1);
+    ManagePendingExpiry(currentBarCount);
+
+    // 1. Manage Active Position (Trailing) - Keep Tick-Based
     CheckActivePosition();
     if(g_activeTicket != 0)
     {
         ManageQuickHandsTrailing(g_activeTicket);
     }
 
-    // 2. Bar Close Logic (Entry Only)
-    // 🔥 GLOBAL RULE: ONLY ENTER AFTER CANDLE CLOSE
-    datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
-    if(currentBarTime != g_lastBarCheck)
-    {
-        g_lastBarCheck = currentBarTime;
-        
-        // Skip check if already in position
-        if(g_activeTicket != 0) return;
+    // 2. ENTRY PIPELINE ONLY ON NEW CANDLE
+    if(!IsNewBar())
+        return;
 
-        StrategySignal sig;
-        if(EvaluateQuickHands(g_hFast, g_hSlow, g_hAtr, sig))
-        {
-            ExecuteQuickHandsTrade(sig);
-        }
-        else if(sig.reason != "NO_PATTERN")
-        {
-            // Log rejection if filter failed on a potential bar
-            string sideStr = (sig.type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
-            datetime barTime = iTime(_Symbol, PERIOD_M1, 1);
-            
-            if(sig.reason == "WEAK_CANDLE_BODY")
-            {
-                LogTyped("REJECTION", StringFormat("[%s] %s rejected: barTime=%s reason=WEAK_CANDLE_BODY c1=%.2f c2=%.2f c3=%.2f", 
-                    EA_TYPE, sideStr, TimeToString(barTime), sig.c1BodyRatio, sig.c2BodyRatio, sig.c3BodyRatio));
-            }
-            else if(sig.reason == "C3_OVEREXTENDED")
-            {
-                LogTyped("REJECTION", StringFormat("[%s] %s rejected: barTime=%s reason=C3_OVEREXTENDED ratio=%.2f c3=%.2f c2=%.2f c1=%.2f", 
-                    EA_TYPE, sideStr, TimeToString(barTime), sig.c3Ratio, sig.c3Body, sig.c2Body, sig.c1Body));
-            }
-            else
-            {
-                LogTyped("REJECTION", StringFormat("[%s] %s skip: barTime=%s atr=%.2f spread=%d reason=%s pattern=%s", 
-                    EA_TYPE, sideStr, TimeToString(barTime), sig.atr, sig.spread, sig.reason, sig.pattern));
-            }
-        }
+    Print("[NEW BAR] Running entry logic");
+
+    // Skip check if already in position or pending order exists
+    if(g_activeTicket != 0 || HasPendingOrder() || HasAnyPendingOrders())
+    {
+        UpdateDashboardStats();
+        return;
     }
 
-    // 3. Update Dashboard
+    // Prevent multiple trades on same candle
+    datetime currentBar = iTime(_Symbol, PERIOD_M1, 0);
+    if(g_lastTradeBar == currentBar)
+    {
+        UpdateDashboardStats();
+        return;
+    }
+
+    StrategySignal sig;
+    if(EvaluateQuickHands(g_hFast, g_hSlow, g_hAtr, sig))
+    {
+        if(ExecuteQuickHandsTrade(sig))
+        {
+            g_lastTradeBar = currentBar;
+        }
+    }
+    // 3. Update Dashboard - Now once per min
     UpdateDashboardStats();
 }
 
@@ -117,15 +153,36 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 {
     if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
     {
-        ulong ticket = trans.position;
-        if(PositionSelectByTicket(ticket))
+        if(HistoryDealSelect(trans.deal))
         {
-            if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+            if((ulong)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) == (ulong)InpMagicNumber)
             {
-                // Position CLOSED
-                if(PositionGetInteger(POSITION_REASON) != POSITION_REASON_EXPERT) 
+                ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+                ulong posTicket = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+
+                if(dealEntry == DEAL_ENTRY_IN)
                 {
-                    // Fallback closed detection logic
+                    ulong fillOrder = (ulong)HistoryDealGetInteger(trans.deal, DEAL_ORDER);
+                    double dealPrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+                    HandleOrderFilled(fillOrder);
+
+                    if(posTicket > 0)
+                    {
+                        GlobalVariableSet(BuildStateKey("qh_initrisk", posTicket), CalculateSLDistanceFromUSD(InpQuickHandsSLUSD, InpLotSize));
+                        GlobalVariableSet(BuildStateKey("qh_traillevel", posTicket), 0);
+                    }
+
+                    LogTyped("EXECUTION", StringFormat("[M1_LSMC] %s executed: tradeId=%I64u entry=%.2f sl=%.2f lot=%.2f strategy=M1_LSMC",
+                             (HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BUY ? "BUY" : "SELL"),
+                             posTicket, dealPrice, PositionSelectByTicket(posTicket) ? PositionGetDouble(POSITION_SL) : 0.0, InpLotSize));
+                }
+                else if(dealEntry == DEAL_ENTRY_OUT)
+                {
+                    double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+                    string resultType = (profit > 0.0) ? "LOCKED_PROFIT" : (profit < 0.0 ? "STOP_LOSS_HIT" : "BREAKEVEN");
+                    LogTyped("RESULT", StringFormat("[%s] %s tradeId=%I64u profit=%.2f", EA_TYPE, resultType, posTicket, profit));
+                    GlobalVariableDel(BuildStateKey("qh_initrisk", posTicket));
+                    GlobalVariableDel(BuildStateKey("qh_traillevel", posTicket));
                 }
             }
         }
@@ -158,41 +215,78 @@ void CheckActivePosition()
 //+------------------------------------------------------------------+
 //| Helper: Execute Trade Logic                                      |
 //+------------------------------------------------------------------+
-void ExecuteQuickHandsTrade(StrategySignal &sig)
+bool ExecuteQuickHandsTrade(StrategySignal &sig)
 {
     double lot = InpLotSize;
+    MqlRates signalBar[];
+    ArraySetAsSeries(signalBar, true);
+    if(CopyRates(_Symbol, PERIOD_M1, 1, 1, signalBar) != 1)
+        return false;
+
     double openPrice = (sig.type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double R = sig.slFinal; // R is the initial SL distance
+    double R = CalculateSLDistanceFromUSD(InpQuickHandsSLUSD, lot);
+    if(R <= 0.0)
+    {
+        LogTyped("REJECTION", StringFormat("[M1_LSMC] %s rejected: reason=INVALID_SL atr=%.2f spread=%d",
+                 (sig.type == POSITION_TYPE_BUY ? "BUY" : "SELL"), sig.atr, (int)sig.spread));
+        return false;
+    }
     double sl = (sig.type == POSITION_TYPE_BUY) ? (openPrice - R) : (openPrice + R);
     sl = NormalizeDouble(sl, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
-
-    // TP = 3:1 RR based on R
-    double tp = (sig.type == POSITION_TYPE_BUY) ? (openPrice + (R * 3.0)) : (openPrice - (R * 3.0));
-    tp = NormalizeDouble(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+    if(sl <= 0.0)
+    {
+        LogTyped("REJECTION", StringFormat("[M1_LSMC] %s rejected: reason=INVALID_SL atr=%.2f spread=%d",
+                 (sig.type == POSITION_TYPE_BUY ? "BUY" : "SELL"), sig.atr, (int)sig.spread));
+        return false;
+    }
+    double tp = 0.0;
 
     string sideStr = (sig.type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
     datetime barTime = iTime(_Symbol, PERIOD_M1, 1);
+    int currentBarCount = Bars(_Symbol, PERIOD_M1);
     
-    LogTyped("CHECK", StringFormat("[%s] %s check: barTime=%s structureSL=%.2f atr=%.2f reason=VALID pattern=%s", 
-        EA_TYPE, sideStr, TimeToString(barTime), sig.structureSL, sig.atr, sig.pattern));
-
-    ENUM_ORDER_TYPE orderType = (sig.type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-    if(g_trade.PositionOpen(_Symbol, orderType, lot, openPrice, sl, tp, "QuickHands M1"))
+    // --- ELITE UPGRADE START ---
+    double marginRequired = 0.0;
+    if(!OrderCalcMargin((sig.type == POSITION_TYPE_BUY ? ORDER_TYPE_BUY : ORDER_TYPE_SELL), _Symbol, lot, openPrice, marginRequired) ||
+       AccountInfoDouble(ACCOUNT_MARGIN_FREE) < marginRequired * 1.5)
     {
-        ulong ticket = g_trade.ResultOrder();
-        if(ticket == 0) ticket = g_trade.ResultDeal();
-        
-        LogTyped("EXECUTION", StringFormat("[%s] %s executed: tradeId=%I64u barTime=%s entry=%.2f sl=%.2f tp=%.2f R=%.2f RR=3", 
-            EA_TYPE, sideStr, ticket, TimeToString(barTime), openPrice, sl, tp, R));
-
-        TradeContext *ctx = new TradeContext;
-        ctx.strategy = EA_TYPE;
-        ctx.eaType = EA_TYPE;
-        ctx.side = sideStr;
-        g_tradeContextMap.Add(ticket, ctx);
-        
-        g_activeTicket = ticket;
+        LogTyped("REJECTION", StringFormat("[M1_LSMC] %s rejected: reason=INSUFFICIENT_MARGIN atr=%.2f spread=%d", 
+            sideStr, sig.atr, (int)sig.spread));
+        return false;
     }
+    // --- ELITE UPGRADE END ---
+
+    if(PositionsTotal() > 0 || HasPendingOrder() || HasAnyPendingOrders())
+        return false;
+
+    double rawEntry = CalculateLimitPrice((sig.type == POSITION_TYPE_BUY), signalBar[0].close, signalBar[0].high, signalBar[0].low);
+    double limitEntry = NormalizeEntryPrice(rawEntry, (sig.type == POSITION_TYPE_BUY));
+    double slDistance = MathAbs(openPrice - sl);
+    sl = RecalculateSL((sig.type == POSITION_TYPE_BUY), limitEntry, slDistance);
+    if(limitEntry <= 0.0 || !MathIsValidNumber(limitEntry))
+    {
+        PrintFormat("[GoldEA][REJECTION] INVALID_ENTRY price=%.5f", limitEntry);
+        return false;
+    }
+
+    ulong orderTicket = PlaceLimitOrder("M1_LSMC",
+                                        (sig.type == POSITION_TYPE_BUY),
+                                        limitEntry,
+                                        sl,
+                                        0.0,
+                                        lot,
+                                        currentBarCount,
+                                        0,
+                                        "QuickHands M1",
+                                        R,
+                                        0);
+    if(orderTicket > 0)
+    {
+        LogTyped("ORDER", StringFormat("[M1_LSMC] %s LIMIT_PLACED tradeId=%I64u barTime=%s entry=%.2f sl=%.2f lot=%.2f strategy=M1_LSMC",
+                 sideStr, orderTicket, TimeToString(barTime), limitEntry, sl, lot));
+        return true;
+    }
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -203,7 +297,7 @@ void UpdateDashboardStats()
     if(!InpEnableDashboard) return;
 
     DashboardState s;
-    s.mode = "ACTIVE"; 
+    s.mode = "M1_LSMC"; 
     s.session = CurrentSessionText();
     s.spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
     
@@ -215,32 +309,43 @@ void UpdateDashboardStats()
     StrategySignal sig;
     EvaluateQuickHands(g_hFast, g_hSlow, g_hAtr, sig);
     
-    double fast, slow;
-    GetIndicatorValue(g_hFast, 1, fast);
-    GetIndicatorValue(g_hSlow, 1, slow);
-    s.trend = (fast > slow) ? "UP" : (fast < slow) ? "DOWN" : "NONE";
+    double ema50_1 = 0.0;
+    double close1 = iClose(_Symbol, PERIOD_M1, 1);
+    GetIndicatorValue(g_hSlow, 1, ema50_1);
+    s.trendStrength = 0.0;
+    s.spreadRatio = 0.0;
+    s.status = (sig.isValid ? "READY" : (sig.reason == "NO_PATTERN" ? "WAIT" : "BLOCKED"));
+    s.phase = "NO LOCK";
+    s.rMultiple = 0.0;
+    bool buyBias = (close1 > ema50_1);
+    bool sellBias = (close1 < ema50_1);
+    s.trend = buyBias ? "BUY_BIAS" : (sellBias ? "SELL_BIAS" : "NEUTRAL");
     
     s.pattern = sig.isValid ? sig.pattern : "NONE";
     
-    // Candle colors (simplified fetch)
-    MqlRates rates[];
-    ArraySetAsSeries(rates, true);
-    if(CopyRates(_Symbol, PERIOD_M1, 1, 3, rates) == 3)
+    // Candle colors from Pattern String
+    string currentPattern = GetCandlePattern();
+    if(StringLen(currentPattern) == 3)
     {
-        s.c1 = (rates[0].close > rates[0].open) ? "G" : "R";
-        s.c2 = (rates[1].close > rates[1].open) ? "G" : "R";
-        s.c3 = (rates[2].close > rates[2].open) ? "G" : "R";
+        s.c3 = StringSubstr(currentPattern, 0, 1);
+        s.c2 = StringSubstr(currentPattern, 1, 1);
+        s.c1 = StringSubstr(currentPattern, 2, 1);
     }
 
     s.slStruct = sig.slStruct;
     s.slATR = sig.slATR;
     s.slFinal = sig.slFinal;
+    s.sweepState = sig.sweep ? "YES" : "NO";
+    s.rejectionState = sig.rejection ? "YES" : "NO";
+    s.confirmationState = sig.confirmation ? "YES" : "NO";
+    s.lockLevel = "NONE";
+    s.slUsd = InpQuickHandsSLUSD;
 
-    s.atrPass = (atr >= InpMinAtrPoints * _Point) ? "PASS" : "FAIL";
-    s.trendPass = (s.trend != "NONE") ? "PASS" : "FAIL";
-    s.spreadPass = (s.spread <= InpMaxSpreadPoints) ? "PASS" : "FAIL";
-    s.qualityPass = (sig.reason != "WEAK_CANDLE_BODY") ? "PASS" : "FAIL";
-    s.c3Overextended = (sig.reason != "C3_OVEREXTENDED") ? "PASS" : "FAIL";
+    s.atrPass = "INFO";
+    s.trendPass = ((sig.pattern == "RRG" && buyBias) || (sig.pattern == "GGR" && sellBias) || sig.reason == "NO_PATTERN") ? "PASS" : "FAIL";
+    s.spreadPass = "INFO";
+    s.qualityPass = (sig.reason != "WEAK_C1_BODY" && sig.reason != "WEAK_CONTEXT_BODY") ? "PASS" : "FAIL";
+    s.c3Overextended = sig.reason;
 
     if(g_activeTicket != 0 && PositionSelectByTicket(g_activeTicket))
     {
@@ -251,14 +356,30 @@ void UpdateDashboardStats()
         s.sl = PositionGetDouble(POSITION_SL);
         s.tp = PositionGetDouble(POSITION_TP);
         
-        double R = MathAbs(s.entry - s.sl);
-        // Note: Initial SL distance is R. If we moved it to BE+R, distance is still R.
-        // Let's use a simpler way to detect "Locked"
-        bool isLocked = false;
-        if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY && s.sl > s.entry) isLocked = true;
-        if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL && s.sl < s.entry) isLocked = true;
-        
-        s.locked = isLocked ? R : 0;
+        // --- ELITE UPGRADE START ---
+        double initR = GlobalVariableCheck(BuildStateKey("qh_initrisk", g_activeTicket)) ? GlobalVariableGet(BuildStateKey("qh_initrisk", g_activeTicket)) : MathAbs(s.entry - s.sl);
+        ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        double currentPrice = (posType == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        double priceMove = (posType == POSITION_TYPE_BUY) ? (currentPrice - s.entry) : (s.entry - currentPrice);
+        s.rMultiple = (initR > 0.0) ? (priceMove / initR) : 0.0;
+        double lockedDistance = (posType == POSITION_TYPE_BUY) ? (s.sl - s.entry) : (s.entry - s.sl);
+        double volume = PositionGetDouble(POSITION_VOLUME);
+        double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+        double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+        s.locked = 0.0;
+        if(lockedDistance > 0.0 && volume > 0.0 && tickSize > 0.0 && tickValue > 0.0)
+            s.locked = (lockedDistance / tickSize) * tickValue * volume;
+
+        if(s.profit >= 2.0)
+        {
+            s.phase = "DYNAMIC";
+            s.lockLevel = StringFormat("%.2f", MathMax(s.profit - 1.0, 0.0));
+        }
+        else if(s.profit >= 1.0)
+        {
+            s.phase = "LOCK 0.5";
+            s.lockLevel = "0.5";
+        }
     }
     else
     {
@@ -275,6 +396,6 @@ void UpdateDashboardStats()
         double R_val = MathAbs(s.entry - s.sl);
         string lockStatus = (s.locked > 0) ? "ACTIVE" : "SCANNING";
         color lockColor = (s.locked > 0) ? clrLime : clrYellow;
-        SetDashboardLabelLine(EA_TYPE, "R_VAL", StringFormat("R: %.2f | TP: %.2f | SL Lock: %s", R_val, MathAbs(s.entry - s.tp), lockStatus), lockColor, 16);
+        SetDashboardLabelLine(EA_TYPE, "R_VAL", StringFormat("RefR: %.2f | TP: %.2f | Lock: %s", R_val, MathAbs(s.entry - s.tp), lockStatus), lockColor, 16);
     }
 }

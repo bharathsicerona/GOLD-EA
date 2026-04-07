@@ -175,24 +175,39 @@ bool ExecuteTrade(const DecisionContext &context)
       return false;
      }
 
-   double entryPrice = (context.type == POSITION_TYPE_BUY) ? SymbolInfoDouble(InpTradeSymbol,SYMBOL_ASK) : SymbolInfoDouble(InpTradeSymbol,SYMBOL_BID);
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double lot = 0.01; // Fixed 0.01 
-   
-   double riskDistance = context.atr * 1.0; 
-   double tpDistance = riskDistance * 3.0; 
-   
-   // --- 2. CORE R-MULTIPLE CONFIGURATION ---
-   if(context.strategyName == "M5_TREND_PULLBACK")
-   {
-       riskDistance = context.atr * 0.8;
-       tpDistance = riskDistance * 2.5; // Target 2.5R
-   }
-   else if(context.strategyName == "M5_ATR_BREAKOUT")
-   {
-       riskDistance = context.atr * 1.2;
-       tpDistance = riskDistance * 4.0; // Target 4R
-   }
+  double entryPrice = (context.type == POSITION_TYPE_BUY) ? SymbolInfoDouble(InpTradeSymbol,SYMBOL_ASK) : SymbolInfoDouble(InpTradeSymbol,SYMBOL_BID);
+  double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+  double lot = 0.01; // Fixed 0.01 
+  double riskDistance = context.atr * 1.0; 
+    
+    // --- 2. CORE RISK CONFIGURATION (Fixed $ vs ATR) ---
+    if(InpUseFixedMoneyRisk)
+    {
+        double tickSize  = SymbolInfoDouble(InpTradeSymbol, SYMBOL_TRADE_TICK_SIZE);
+        double tickValue = SymbolInfoDouble(InpTradeSymbol, SYMBOL_TRADE_TICK_VALUE);
+        if(tickValue > 0)
+        {
+            // Calculate distance for exactly InpFixedRiskAmount loss
+            riskDistance = (InpFixedRiskAmount / (lot * tickValue)) * tickSize;
+            
+            // Safety cap: Ensure SL is at least 1.5x Spread to avoid immediate rejection
+            double minStop = context.spread * 1.5 * _Point;
+            if(riskDistance < minStop) riskDistance = minStop;
+        }
+    }
+    else if(context.strategyName == "M5_TREND_PULLBACK")
+    {
+        riskDistance = context.atr * 0.8;
+    }
+    else if(context.strategyName == "M5_ATR_BREAKOUT")
+    {
+        riskDistance = context.atr * 1.2;
+    }
+
+    // TP is always a multiple of the active risk distance
+    double tpMultiplier = 2.5; 
+    if(context.strategyName == "M5_ATR_BREAKOUT") tpMultiplier = 4.0;
+    double tpDistance = riskDistance * tpMultiplier; 
 
    double sl = 0.0;
    double tp = 0.0;
@@ -201,6 +216,8 @@ bool ExecuteTrade(const DecisionContext &context)
      {
       sl = NormalizeDouble(context.sl, g_symbolDigits);
       tp = NormalizeDouble(context.tp, g_symbolDigits);
+      riskDistance = MathAbs(entryPrice - sl);
+      tpDistance = MathAbs(tp - entryPrice);
      }
    else if(context.type == POSITION_TYPE_BUY)
      {
@@ -215,55 +232,57 @@ bool ExecuteTrade(const DecisionContext &context)
 
    ulong tradeId = NextTradeId();
    string commentText = StringFormat("GoldEA#%I64u %s",tradeId,context.decision);
+   if(HasOpenPosition() || HasPendingOrder() || HasAnyPendingOrders())
+     {
+      LogRejection(context.decision, "MAX_TRADES_REACHED", 0.0, balance);
+      return false;
+     }
 
-   trade.SetExpertMagicNumber(InpMagicNumber);
-   trade.SetDeviationInPoints(20);
+   MqlRates signalBar[];
+   ArraySetAsSeries(signalBar, true);
+   if(CopyRates(InpTradeSymbol, InpTimeframe, 1, 1, signalBar) != 1)
+      return false;
 
-   bool success = false;
-   if(context.type == POSITION_TYPE_BUY)
-      success = trade.Buy(lot,InpTradeSymbol,0.0,sl,tp,commentText);
-   else if(context.type == POSITION_TYPE_SELL)
-      success = trade.Sell(lot,InpTradeSymbol,0.0,sl,tp,commentText);
+   bool isBuy = (context.type == POSITION_TYPE_BUY);
+   double rawEntry = CalculateLimitPrice(isBuy, signalBar[0].close, signalBar[0].high, signalBar[0].low);
+   double limitEntry = NormalizeEntryPrice(rawEntry, isBuy);
+   double limitSl = RecalculateSL(isBuy, limitEntry, riskDistance);
+   double limitTp = isBuy ? (limitEntry + tpDistance) : (limitEntry - tpDistance);
+   limitSl = NormalizeDouble(limitSl, g_symbolDigits);
+   limitTp = NormalizeDouble(limitTp, g_symbolDigits);
+   if(limitEntry <= 0.0 || !MathIsValidNumber(limitEntry))
+     {
+      PrintFormat("[GoldEA][REJECTION] INVALID_ENTRY price=%.5f", limitEntry);
+      return false;
+     }
 
-   if(!success)
+   int strategyId = 0;
+   if(context.strategyName == "M5_TREND_PULLBACK") strategyId = 1;
+   else if(context.strategyName == "M5_ATR_BREAKOUT") strategyId = 2;
+   else if(context.strategyName == "M5_SMART_REVERSAL_FVG") strategyId = 3;
+
+   int currentBarCount = Bars(InpTradeSymbol, InpTimeframe);
+   ulong orderTicket = PlaceLimitOrder(context.strategyName,
+                                       isBuy,
+                                       limitEntry,
+                                       limitSl,
+                                       limitTp,
+                                       lot,
+                                       currentBarCount,
+                                       tradeId,
+                                       commentText,
+                                       riskDistance,
+                                       strategyId);
+
+   if(orderTicket == 0)
      {
       string failReason = StringFormat("ORDER_FAILED_%d_%s",trade.ResultRetcode(),trade.ResultRetcodeDescription());
       LogRejection(context.decision, "ORDER_FAILED", lot, balance);
       return false;
      }
-
-   ulong ticket = 0;
-   ulong resultDeal = trade.ResultDeal();
-   if(resultDeal > 0 && HistoryDealSelect(resultDeal))
-      ticket = (ulong)HistoryDealGetInteger(resultDeal,DEAL_POSITION_ID);
-   if(ticket == 0)
-      ticket = FindPositionTicketByComment(commentText);
-
-   if(ticket > 0)
-     {
-      GlobalVariableSet(BuildStateKey("initrisk",ticket),riskDistance);
-      GlobalVariableSet(BuildStateKey("tradeid",ticket),(double)tradeId);
-      double stratId = 0.0;
-      if(context.strategyName == "M5_TREND_PULLBACK") stratId = 1.0;
-      else if(context.strategyName == "M5_ATR_BREAKOUT") stratId = 2.0;
-      else if(context.strategyName == "M5_SMART_REVERSAL_FVG") stratId = 3.0;
-      GlobalVariableSet(BuildStateKey("strategy",ticket), stratId);
-      GlobalVariableSet(BuildStateKey("M5TrailLevel", ticket), 0); 
-     }
-
-   if(context.strategyName == "M5_TREND_PULLBACK") g_sessionTradeCountTrend++;
-   else if(context.strategyName == "M5_ATR_BREAKOUT") g_sessionTradeCountBreakout++;
-
-   DrawTradeArrow(tradeId, context.type, false, entryPrice);
-   totalTrades++;
-
-   // Store Trade Context for lifecycle tracking
-   TradeContext *tCtx = new TradeContext(context.strategyName, (context.type == POSITION_TYPE_BUY ? "BUY" : "SELL"), "M5");
-   g_tradeContextMap.Add(tradeId, tCtx);
-
    datetime barTime = iTime(InpTradeSymbol, InpTimeframe, 1);
-   LogTyped("EXECUTION", StringFormat("[%s] %s executed: tradeId=%I64u barTime=%s lot=%.2f entry=%.2f sl=%.2f tp=%.2f strategy=%s",
-                                       context.strategyName, tCtx.side, tradeId, TimeToString(barTime), lot, entryPrice, sl, tp, context.strategyName));
+   LogTyped("ORDER", StringFormat("[%s] %s LIMIT_PLACED tradeId=%I64u barTime=%s lot=%.2f entry=%.2f sl=%.2f tp=%.2f strategy=%s",
+                                       context.strategyName, (isBuy ? "BUY" : "SELL"), tradeId, TimeToString(barTime), lot, limitEntry, limitSl, limitTp, context.strategyName));
    
    return true;
   }
@@ -305,6 +324,46 @@ void ManageTrade(const ulong ticket,const bool isNewBar)
    
    string trailLevelKey = BuildStateKey("M5TrailLevel", ticket);
    int currentTrailLevel = GlobalVariableCheck(trailLevelKey) ? (int)GlobalVariableGet(trailLevelKey) : 0;
+
+    // --- 3. SIGNAL RE-EVALUATION (The "Next Candle" Rule) ---
+    if(InpEnableSignalTightening && isNewBar)
+    {
+        IndicatorSnapshot liveSnapshot;
+        if(CalculateIndicators(liveSnapshot, 1)) // Check the candle that just closed
+        {
+            DecisionContext buyContext = SelectAndRunStrategy(POSITION_TYPE_BUY, liveSnapshot, true);
+            DecisionContext sellContext = SelectAndRunStrategy(POSITION_TYPE_SELL, liveSnapshot, true);
+            
+            bool isReversal = (type == POSITION_TYPE_BUY && sellContext.valid) || (type == POSITION_TYPE_SELL && buyContext.valid);
+            bool isWeakness = (type == POSITION_TYPE_BUY && buyContext.reason == "WEAK_CANDLE") || 
+                              (type == POSITION_TYPE_SELL && sellContext.reason == "WEAK_CANDLE");
+                              
+            if(isReversal || isWeakness)
+            {
+                // Reaction: Tighten SL to Breakeven or current Trail Level
+                double lockedSl = (type == POSITION_TYPE_BUY) ? (openPrice + initialRisk * 0.1) : (openPrice - initialRisk * 0.1);
+                
+                // If we are already in profit, we can even lock more (e.g. current candle low/high)
+                if(isReversal)
+                {
+                   LogTyped("MGMT", StringFormat("[%s] REVERSAL detected on next candle. Tightening SL to protect capital.", (type == POSITION_TYPE_BUY ? "BUY" : "SELL")));
+                }
+                else
+                {
+                   LogTyped("MGMT", StringFormat("[%s] WEAKNESS detected on next candle. Moving to safety.", (type == POSITION_TYPE_BUY ? "BUY" : "SELL")));
+                }
+                
+                if((type == POSITION_TYPE_BUY && lockedSl > currentSl) || (type == POSITION_TYPE_SELL && (lockedSl < currentSl || currentSl == 0)))
+                {
+                    if(trade.PositionModify(ticket, NormalizeDouble(lockedSl, g_symbolDigits), currentTp))
+                    {
+                        currentSl = lockedSl;
+                        GlobalVariableSet(trailLevelKey, 1); // Move to level 1 (BE)
+                    }
+                }
+            }
+        }
+    }
 
    double newSlPrice = 0.0;
    int desiredTrailLevel = currentTrailLevel;
@@ -483,9 +542,38 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
         return;
 
     ENUM_DEAL_ENTRY entryType = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-    
-    if (entryType == DEAL_ENTRY_IN)
+    if(entryType == DEAL_ENTRY_IN)
+    {
+        ulong orderId = (ulong)HistoryDealGetInteger(trans.deal, DEAL_ORDER);
+        ulong posId = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+        double dealPrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+        string side = (HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+
+        PendingOrderInfo fillInfo = g_pendingOrder;
+        HandleOrderFilled(orderId);
+
+        if(posId > 0)
+        {
+            GlobalVariableSet(BuildStateKey("initrisk", posId), fillInfo.riskDistance);
+            GlobalVariableSet(BuildStateKey("tradeid", posId), (double)fillInfo.logicalTradeId);
+            GlobalVariableSet(BuildStateKey("strategy", posId), (double)fillInfo.strategyId);
+            GlobalVariableSet(BuildStateKey("M5TrailLevel", posId), 0);
+        }
+
+        if(fillInfo.strategy == "M5_TREND_PULLBACK") g_sessionTradeCountTrend++;
+        else if(fillInfo.strategy == "M5_ATR_BREAKOUT") g_sessionTradeCountBreakout++;
+
+        DrawTradeArrow(fillInfo.logicalTradeId, (side == "BUY" ? POSITION_TYPE_BUY : POSITION_TYPE_SELL), false, dealPrice);
+        totalTrades++;
+
+        TradeContext *tCtx = new TradeContext(fillInfo.strategy, side, "M5");
+        g_tradeContextMap.Add(fillInfo.logicalTradeId, tCtx);
+
+        LogTyped("EXECUTION", StringFormat("[%s] %s executed: tradeId=%I64u barTime=%s lot=%.2f entry=%.2f sl=%.2f tp=%.2f strategy=%s",
+                                           fillInfo.strategy, side, fillInfo.logicalTradeId, TimeToString((datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME)),
+                                           fillInfo.lot, dealPrice, fillInfo.sl, fillInfo.tp, fillInfo.strategy));
         return;
+    }
 
     if(entryType != DEAL_ENTRY_OUT)
         return;

@@ -1,35 +1,38 @@
 # XAUUSD M1 QuickHands EA
 
-The M1 QuickHands EA is a standalone Expert Advisor designed for fast, pattern-based scalping on the M1 timeframe. It focuses on a specific candlestick pattern ("GG-R" and "RR-G") aligned with the prevailing trend.
+The M1 QuickHands EA is a standalone Expert Advisor designed for fast, pattern-based scalping on the M1 timeframe. It focuses on a specific candlestick pattern ("GGR" and "RRG") aligned with the prevailing trend.
 
 ## 🧠 Core Strategy: Trend-Aligned Reversion Pattern
 
 The EA follows a simple but effective pattern-based entry logic:
 
-### BUY Pattern: GG-R
+### BUY Pattern: GGR
 - **Condition:** EMA Fast (20) > EMA Slow (50)
-- **Candle Pattern:**
-    - Candle[3] = GREEN (Bullish)
-    - Candle[2] = GREEN (Bullish)
-    - Candle[1] = RED (Bearish)
-- **Entry:** Executive on Candle[0] (Open of the current candle)
+- **Candle Pattern (Old -> New):**
+    - Candle[3] = GREEN
+    - Candle[2] = GREEN
+    - Candle[1] = RED
+- **Pullback Rule:** `(C1 Range) < 0.6 * (C2 High - C3 Low)`
+- **Entry:** Open of Candle[0]
 
-### SELL Pattern: RR-G
+### SELL Pattern: RRG
 - **Condition:** EMA Fast (20) < EMA Slow (50)
-- **Candle Pattern:**
-    - Candle[3] = RED (Bearish)
-    - Candle[2] = RED (Bearish)
-    - Candle[1] = GREEN (Bullish)
-- **Entry:** Executive on Candle[0] (Open of the current candle)
+- **Candle Pattern (Old -> New):**
+    - Candle[3] = RED
+    - Candle[2] = RED
+    - Candle[1] = GREEN
+- **Pullback Rule:** `(C1 Range) < 0.6 * (C3 High - C2 Low)`
+- **Entry:** Open of Candle[0]
 
 ## 💰 Risk & Money Management
 
 - **Fixed Lot:** 0.01 lot per trade.
-- **Fixed Risk SL:** Uses the `GoldEA_Unified_Risk.mqh` engine to enforce a $3 stop loss.
-- **Fixed TP:** $15 take profit ($3 risk : $15 reward = 1:5 RR).
+- **Initial Stop Distance:** Built from the entry module using a hybrid structure/ATR model.
+- **Risk Clamp:** Entry logic clamps the prepared stop distance into a practical `4.0` to `6.0` price-distance band.
+- **Fixed TP:** Current execution path targets **3R**, not 5R.
 - **Trailing Logic:**
-    - At +1R profit: Lock in 0.3R or (Profit - 1R).
-    - At +2R profit: Lock in (Profit - 1R).
+    - No change before `2R`.
+    - At `2R`, move stop to about `+1R`.
 
 ## 📊 Standardized Logging
 

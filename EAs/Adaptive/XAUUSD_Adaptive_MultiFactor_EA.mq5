@@ -17,6 +17,7 @@ datetime g_lastTradeTime    = 0;
 #include "XAUUSD_Adaptive_Entry.mqh"
 #include "XAUUSD_Adaptive_Risk.mqh"
 #include "XAUUSD_Adaptive_Logging.mqh"
+#include "../Include/GoldEA_Limit_Execution.mqh"
 
 // Define the EA type for logging purposes, as required by XAUUSD_Adaptive_Management.mqh
 string EA_TYPE = "M5";
@@ -123,6 +124,9 @@ void OnDeinit(const int reason)
 
 void OnTick()
   {
+   int currentBarCount = Bars(InpTradeSymbol, InpTimeframe);
+   ManagePendingExpiry(currentBarCount);
+
    UpdateAsianRange();
    EvaluateTickAndDashboard();
 
